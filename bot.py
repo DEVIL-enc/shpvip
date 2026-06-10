@@ -43,6 +43,7 @@ PAYU_CONCURRENCY = 200            # Concurrent PayU tasks for Stripe/Braintree m
 
 API_ID = 39825025
 API_HASH = "47170fd9a11b3f591bbc56849519f0f8"
+PHONE_NUMBER = "+919320665632"
 
 STORAGE_DIR = "uploads"
 PROCESSED_DIR = "processed"
