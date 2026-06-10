@@ -22,19 +22,19 @@ from telethon import TelegramClient, events, errors
 from telethon.tl.custom import Button
 
 # ======================== CONFIGURATION ========================
-BOT_TOKEN = "8765865854:AAGh5g1ZIHfXEJVU2FAFyjhl2W1WQO9kuJg"
-PAYU_BOT_USERNAME = "@newpayubot"
+BOT_TOKEN = "7186448008:AAEShdE9LiMhl5xBldLficz4RgXLDJz5GWQ"
+PAYU_BOT_USERNAME = "@D3v1l_vip_bot"
 MAX_CARDS_PER_FILE_STRIPE = 10000
 MAX_CARDS_PER_FILE_BRAINTREE = 3000
 MAX_CARDS_PER_FILE_SHOPIFY = 3000
 DELAY_BETWEEN_CHECKS = 0.02       # 20ms between cards (was 0.05)
 MESSAGE_DELAY = 0.1               # 100ms between bot messages
-BOT_OWNER_ID = 8205144423
+BOT_OWNER_ID = 1707478010
 ADMINS = [BOT_OWNER_ID]
 NUM_WORKERS = 50                  # OPTIMISED: increased concurrency — Hostinger 8GB can handle it, API has own limits
 
-API_ID = 33424122
-API_HASH = "b4c85089f9748bf3a33f7043c64af7c5"
+API_API_ID = 39825025
+API_HASH = "47170fd9a11b3f591bbc56849519f0f8"
 PHONE_NUMBER = "+919320665632"
 
 STORAGE_DIR = "uploads"
@@ -47,7 +47,7 @@ FORWARD_CHAT_ID = BOT_OWNER_ID
 
 BIN_API_URL = "https://lookup.binlist.net/{}"
 
-SHOPIFY_API_URL = "http://31.97.40.61:5000/shopify"
+SHOPIFY_API_URL = "‏http://127.0.0.1:5000/shopify"
 SITES_FILE = "sites.txt"
 PROXY_VALIDATION_TIMEOUT = 8
 PROXY_VALIDATION_RETRIES = 1
@@ -63,7 +63,7 @@ JOB_NO_PROGRESS_TIMEOUT = 300    # FIX: auto-cancel mass job after 300s without 
 # ═══════════════ Shopify Flask API Checkout Config ═══════════════
 SHOPIFY_API_TIMEOUT = 30           # Timeout for Flask API calls (API has its own 30s internal timeout)
 SHOPIFY_TEST_SITE_TIMEOUT = 35     # timeout per site during /test_sites (slightly above API timeout)
-SHOPIFY_WORKING_SITES_API = "https://apok-production.up.railway.app/sites/working"
+SHOPIFY_WORKING_SITES_API = "‏http://127.0.0.1:5000/working"
 SHOPIFY_MAX_SITE_AMOUNT = 15.0     # Max product price for auto-site selection
 MAX_CAPTCHA_RETRIES = 2            # Auto-retry with new site on CAPTCHA
 FAST_FAIL_THRESHOLD_SECS = 1.0     # Cards completing faster than this likely didn't reach payment step
