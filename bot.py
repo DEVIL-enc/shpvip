@@ -4874,11 +4874,12 @@ class CardCheckerBot:
                 self.bot_client = TelegramClient("bot_session", API_ID, API_HASH)
                 await self.bot_client.start(bot_token=BOT_TOKEN)
                 self.user_client = TelegramClient("checker_session", API_ID, API_HASH)
+                
                 if os.path.exists("checker_session.session"):
                     await self.user_client.connect()
-
-if not await self.user_client.is_user_authorized():
-    raise Exception("Session not authorized. Upload valid bot_session.session")
+                    # تم إصلاح المحاذاة هنا لتصبح داخل شرط الـ if الصحيح
+                    if not await self.user_client.is_user_authorized():
+                        raise Exception("Session not authorized. Upload valid bot_session.session")
                 else:
                     await self.user_client.start(phone=PHONE_NUMBER)
 
@@ -4972,4 +4973,5 @@ if __name__ == "__main__":
         asyncio.run(bot.run())
     except KeyboardInterrupt:
         logger.info("Shutdown.")
+
                     
